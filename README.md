@@ -28,15 +28,15 @@ package is shared unchanged and the branch only adds the board. It tracks `UniXN
 | Stage | State | Notes |
 | --- | --- | --- |
 | UEFI (erhaiPkg) and payload handoff | ✅ | Own Mu-Silicium platform; payload embedded in the boot image kernel field (the OnePlus ABL replaces the ramdisk) |
-| XNU entry, GIC, timer | ✅ | Boot CPU only (`cpus=1`) |
+| XNU entry, GIC, timer | ✅ | |
+| SMP (8 Oryon cores) | ✅ | Prime cores need MPIDR Aff2 in XNU's CPU id (UniXNU patch pending upstream) |
 | Native UFS | ✅ | SM8750 controller: identity stage-1 SMMU context, Hibern8 exit before the first command |
 | UFS root (verified OS + SystemOS windows on userdata) | ✅ | |
 | launchd and userspace | ✅ | Needed native PAN (Oryon implements PAN) |
 | Data volume | ⚠️ | RAM-backed (ephemeral); persistent Data not yet |
 | Display | ⚠️ | CPU-rendered NativeLegacyDisplay on the GOP framebuffer (3392x2400); Apple logo shown |
-| SpringBoard / home screen | 🚧 | Next: sheng's signed-text fixups (AWAttention deadlock) on this branch |
+| SpringBoard / home screen | 🚧 | SpringBoard starts; backboardd and several daemons still exit |
 | Touch (Novatek NT36536) | ❌ | |
-| SMP (8 cores) | ❌ | |
 | GPU (Adreno 830) | ❌ | |
 | Wi-Fi, Bluetooth, audio, camera, USB, battery, suspend | ❌ | |
 
