@@ -29,6 +29,13 @@
 //   8  as 7, then, only after a complete cold start, S3 (gxOn): the HFI GX_BW_PERF_VOTE at `erhai-gpu-perf` (default the
 //      lowest OPP) and OOB GPU_SET, so the GMU powers GX; RBBM_STATUS and the GBIF halts are read only if GX reports on.
 //      Row 4 shows the result, wide row 0 also the gxclkctl GX GDSCR before > after. No GPU register is written.
+//   9  as 8, then, only when GX reports on, S4 (gpuStart): the rest of a8xx hw_init. The GPU's own native-4K context through
+//      NativeAdreno (NativeAdrenoGpuContextBringup: bank 0, ASID 2, SIDs 0/1 on SMR slots 0/1, their S2CRs faulted first as
+//      for the GMU's) with the SQE, ring, memptrs, power-up list and scratch buffers; gen80000_sqe.fw minus its first dword;
+//      ErhaiGpuHwInit (the register part of hw_init, host-compared with Linux by check-erhai-gpu-hwinit.py) around the
+//      gen8 NativeAdreno ring attach and CP_ME_INIT; the zap shader (ErhaiZapLoad: PAS 13 into gpu_microcode_mem
+//      0x9b09a000, check-erhai-gpu-zap.py) and CP_SET_SECURE_MODE 0; RB_GC_GMEM_PROTECT, the power-up list, clock gating
+//      and the OOB GPU_SET clear; then one CP_MEM_WRITE to the scratch page with its fence. Rows 5-7 and wide row 1 show it.
 // Rows: diagnostic extension slots 4-7 and the two wide rows (the banner's GPU3-GPU6 and GPU7-GPU8, shown with sheng-banner=1).
 // `erhai-gpu-dump=1` additionally panics with the whole report (every valid stream-match entry), one photo of the panic screen,
 // and starts a watchdog that panics with the stage reached if the probe has not finished 70 s after it started.
@@ -42,6 +49,12 @@
 #include <pexpert/pexpert.h>
 #include "ErhaiGpuBoard.h"
 #include "NativeAdrenoGmuContext.h"
+#include "NativeAdrenoGpuContext.h"
+#include "NativeAdrenoCpInit.h"
+#include "NativeAdrenoMemory.h"
+#include "AdrenoPM4.h"
+#include "ErhaiGpuHwInit.h"
+#include "ErhaiGpuZap.h"
 #include "ShengGmuVotes.h"
 #include "ShengGmuCommandDb.h"
 #include "ShengGmu.h"
@@ -374,20 +387,35 @@ int coldNow(void *, uint64_t *us) {
     return 0;
 }
 int coldWait(void *, unsigned us) {IODelay(us); return 0;}
-// SIP SMC (qcom_scm-smc.c): ARM_SMCCC_CALL_VAL(STD, SMC_64, OWNER_SIP, svc << 8 | cmd), x1 arginfo, x2 the argument.
-// QCOM_SCM_INTERRUPTED (1) resumes with x0 = 1 and the returned x6; QCOM_SCM_V2_EBUSY (-12) retries after 30 ms, 20 times.
-int64_t scmCall(uint64_t fn, uint64_t arginfo, uint64_t arg, uint32_t &resumes) {
+// SIP SMC (qcom_scm-smc.c): ARM_SMCCC_CALL_VAL(STD, SMC_64, OWNER_SIP, svc << 8 | cmd), x1 arginfo, x2..x5 the arguments
+// (up to four are passed directly), x1 back is res.result[0]. QCOM_SCM_INTERRUPTED (1) resumes with x0 = 1 and the returned
+// x6; QCOM_SCM_V2_EBUSY (-12) retries after 30 ms, 20 times.
+int64_t scmCall(uint64_t fn, uint64_t arginfo, const uint64_t *args, unsigned count, uint32_t &resumes, uint64_t *result = nullptr) {
     uint64_t first = fn, a6 = 0;
+    const uint64_t a[4] = {count > 0 ? args[0] : 0, count > 1 ? args[1] : 0, count > 2 ? args[2] : 0, count > 3 ? args[3] : 0};
     for (unsigned busy = 0; resumes < 10000;) {
-        register uint64_t x0 asm("x0") = first, x1 asm("x1") = arginfo, x2 asm("x2") = arg, x3 asm("x3") = 0;
-        register uint64_t x4 asm("x4") = 0, x5 asm("x5") = 0, x6 asm("x6") = a6, x7 asm("x7") = 0;
+        register uint64_t x0 asm("x0") = first, x1 asm("x1") = arginfo, x2 asm("x2") = a[0], x3 asm("x3") = a[1];
+        register uint64_t x4 asm("x4") = a[2], x5 asm("x5") = a[3], x6 asm("x6") = a6, x7 asm("x7") = 0;
         asm volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
                      :: "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
         if (x0 == 1) {first = 1; a6 = x6; ++resumes; continue;}
         if (int64_t(x0) == -12 && busy++ < 20) {first = fn; a6 = 0; IOSleep(30); continue;}
+        if (result) *result = x1;
         return int64_t(x0);
     }
     return -1000;
+}
+// qcom_scm_remap_error: the secure world's codes as the errno qcom_scm_call returns.
+int64_t scmErrno(int64_t a0) {
+    switch (a0) {
+    case 0: return 0;
+    case -1: return -5;                // QCOM_SCM_ERROR -> -EIO
+    case -2: case -3: return -22;      // EINVAL_ARG / EINVAL_ADDR -> -EINVAL
+    case -4: return -95;               // EOPNOTSUPP
+    case -5: return -12;               // ENOMEM
+    case -12: return -16;              // V2_EBUSY -> -EBUSY
+    default: return -22;
+    }
 }
 void gmuColdStart() {
     gColdStep = 1;
@@ -397,7 +425,8 @@ void gmuColdStart() {
     gFuseBefore = cx[0x400];                                                   // CX_MISC_SW_FUSE_VALUE
     erhai_gpu_power_stage = 0x70;
     setRow(4, "EG m7 scm gpu_init_regs");
-    gScmRet = scmCall(0x42000000u | (0x28u << 8) | 0x01u, 1, (1u << 0) | (1u << 3), gScmResumes);
+    const uint64_t initRegs = (1u << 0) | (1u << 3);
+    gScmRet = scmCall(0x42000000u | (0x28u << 8) | 0x01u, 1, &initRegs, 1, gScmResumes);
     gFuseAfter = cx[0x400];
     if (gScmRet) return;
     gColdStep = 3;
@@ -504,6 +533,233 @@ void gxOn() {
     }
     erhai_gpu_power_stage = gx ? 0x87 : 0x8f;
 }
+// S4, mode 9: the rest of a8xx hw_init after OOB GPU_SET, in Linux order (research/a830-gpu-plan.md S4).
+extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *, size_t, unsigned, unsigned, unsigned, unsigned, unsigned,
+    unsigned, void (*)(uint32_t), NativeAdrenoGmuContextReport *) __attribute__((weak));
+extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5]) __attribute__((weak));
+extern "C" const uint8_t erhai_gpu_sqe_image[] __attribute__((weak));
+extern "C" const uint64_t erhai_gpu_sqe_image_size __attribute__((weak));
+extern "C" const uint8_t erhai_gpu_zap_image[] __attribute__((weak));
+extern "C" const uint64_t erhai_gpu_zap_image_size __attribute__((weak));
+// arm-smmu-qcom gives the GPU context bank 0; the live DT's gpu iommus are SIDs 0 and 1. ASID 2 and SMR slots 0/1 are this
+// probe's choice (the GMU has bank 1, ASID 1, slot 2).
+constexpr unsigned kGpuBank = 0, kGpuAsid = 2, kGpuSlot[2] = {0, 1}, kGpuSid[2] = {0, 1};
+constexpr uint64_t kZapPhys = 0x9b09a000, kZapBytes = 0x2000;   // live DT gpu_microcode_mem (the zap-shader memory-region)
+constexpr uint32_t kGpuPasId = 13;                               // a8xx_gpu.c GPU_PAS_ID
+NativeAdrenoGmuContextReport gGpuContext;
+IOReturn gGpuContextStatus = kIOReturnNotReady;
+OSSharedPtr<IOMemoryMap> gGpuMaps[5], gZapMap;
+volatile uint8_t *gGpuCpu[5];
+NativeAdrenoGpuBuffer gGpuBuffers[5];
+NativeAdrenoRing gRing;
+NativeAdrenoCpInit gCpInit;
+NativeAdrenoMemory gZapMetadata;
+ErhaiGpuHw gHw;
+ErhaiZapResult gZap;
+// step, S2CR before slot 0/1, SQE mismatch offset, hw status, CP init IOReturn, CP init fence, zap result, secure-mode fence,
+// post status, pwrup bytes, mem-write fence, scratch word
+uint32_t gCp[13];
+int64_t gZapRet = 1, gApertureRet = 1;
+uint32_t gApertureAvail = 0xdead, gScmPasResumes;
+uint32_t gSnap[6];
+// GPU register dwords from the GPU base: the GPU window below 0x6c000, the GMU window (GPU + 0x6c000) from there.
+volatile uint32_t *gpuReg(uint32_t reg) {
+    const uint64_t byte = uint64_t(reg) * 4;
+    if (byte >= 0x6c000) return byte - 0x6c000 < kGmuLen[0] && gGmuVa[0] ? gGmuVa[0] + (byte - 0x6c000) / 4 : nullptr;
+    return gColdGpuMap && byte < kColdGpuLen ? reinterpret_cast<volatile uint32_t *>(gColdGpuMap->getVirtualAddress() + byte) : nullptr;
+}
+int hwWrite(void *, uint32_t reg, uint32_t value) {
+    volatile uint32_t *r = gpuReg(reg);
+    if (!r) return 1;
+    *r = value;
+    return 0;
+}
+int hwRead(void *, uint32_t reg, uint32_t *value) {
+    volatile uint32_t *r = gpuReg(reg);
+    if (!r) return 1;
+    *value = *r;
+    return 0;
+}
+int hwWait(void *, unsigned us) {IODelay(us); return 0;}
+int hwBarrier(void *) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
+// adreno_hw_init: qcom_scm_set_gpu_smmu_aperture(0) when __qcom_scm_is_call_available(MP, CP_SMMU_APERTURE_ID) says so.
+int hwAperture(void *) {
+    uint64_t avail = 0, query = (2u << 24) | (0x0cu << 8) | 0x1bu;   // SCM_SMC_FNID(MP, 0x1b) | OWNER_SIP << 24
+    uint32_t resumes = 0;
+    const int64_t a0 = scmCall(0x42000000u | (0x06u << 8) | 0x01u, 1, &query, 1, resumes, &avail);
+    gApertureAvail = a0 ? 0xe0000000u | uint32_t(a0 & 0xfff) : uint32_t(avail);
+    if (a0 || !avail) return 1;
+    const uint64_t args[4] = {0xffff0000u | 0u, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+    gApertureRet = scmErrno(scmCall(0x42000000u | (0x0cu << 8) | 0x1bu, 4, args, 4, resumes));
+    return int(gApertureRet);
+}
+const ErhaiGpuIo kHwIo = {nullptr, hwWrite, hwRead, hwWait, hwAperture};
+const NativeAdrenoRingIo kRingIo = {nullptr, hwWrite, hwRead, hwBarrier};
+int ringPublish(void *, const volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
+int ringAcquire(void *, volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
+const NativeAdrenoRingCache kRingCache = {nullptr, ringPublish, ringAcquire};
+uint64_t ringNow(void *) {uint64_t us = 0; coldNow(nullptr, &us); return us;}
+int ringIdle(void *) {IODelay(50); return 0;}
+const NativeAdrenoRingClock kRingClock = {nullptr, ringNow, ringIdle};
+// The zap load's platform: the PIL SMCs with qcom_scm's result convention, and cache publication of the metadata (cacheable
+// NativeAdreno memory, cleaned to PoC as dma_alloc_coherent memory would need none) or of the write-combined region.
+int64_t zapPas(void *, uint32_t cmd, uint32_t arginfo, const uint64_t *args, unsigned count) {
+    uint64_t result = 0;
+    const int64_t a0 = scmCall(0x42000000u | (0x02u << 8) | cmd, arginfo, args, count, gScmPasResumes, &result);
+    return a0 ? scmErrno(a0) : int64_t(int32_t(result));
+}
+int zapPublish(void *, const volatile void *ptr, size_t bytes) {
+    // publishForDevice takes whole pages (the metadata is 0xfcc bytes of a 0x2000-byte object).
+    if (ptr == gZapMetadata.mapping()) return gZapMetadata.publishForDevice(0, (bytes + 4095) & ~size_t(4095), false) ? 1 : 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+    return 0;
+}
+void gpuContextProgress(uint32_t step) {
+    char row[48];
+    snprintf(row, sizeof row, "Q step %u running", step);
+    setRow(5, row);
+    erhai_gpu_power_stage = 0x90 + step;
+}
+void hwRow() {
+    // H c<step> p<hw status>/<hw step> f<failed reg> a<aperture avail>/<ret> i<CP init>/<fence> z<zap> s<secure fence>
+    //   P<post status>/<pwrup bytes> m<mem-write fence>/<scratch ok>
+    char row[64];
+    const uint32_t *c = gCp;
+    snprintf(row, sizeof row, "H c%u p%u/%u f%x a%x/%d i%x/%u z%d s%u P%u/%u m%u/%u", c[0], c[3], gHw.step, gHw.failed_reg,
+             gApertureAvail, int(gApertureRet), c[4], c[5], int(gZapRet), c[7], c[8], c[9], c[10], c[11] == 0x5e9a830u);
+    setRow(6, row);
+    ErhaiGpuHwSnapshot(&kHwIo, gSnap);
+    const volatile uint32_t *mem = gGpuCpu[2] ? reinterpret_cast<const volatile uint32_t *>(gGpuCpu[2]) : nullptr;
+    snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1],
+             "S4 R%x I%x C%x F%x r%x/%x m%x/%x/%x gp%x p2s%u/%x s2cr%x/%x sqe%x pwr%u/%u/%u", gSnap[0], gSnap[1], gSnap[2],
+             gSnap[3], gSnap[4], gSnap[5], mem ? mem[0] : 0, mem ? mem[1] : 0, mem ? mem[2] : 0, gHw.gmem_protect,
+             gHw.p2s_polls, gHw.p2s_status, c[1] & 0xffff, c[1] >> 16, c[2], gHw.pwrup_ifpc, gHw.pwrup_preemption, gHw.pwrup_dynamic);
+}
+void zapRow() {
+    // Z<ret> s<step> i<init_image> m<mem_setup> a<auth_and_reset> n<mem_size> r<resumes> M<metadata bytes> g<segments>
+    char row[64];
+    snprintf(row, sizeof row, "Z%d s%u i%d m%d a%d n%llx r%u M%u g%u", int(gZapRet), gZap.step, int(gZap.init_image),
+             int(gZap.mem_setup), int(gZap.auth_and_reset), static_cast<unsigned long long>(gZap.mem_size), gScmPasResumes,
+             gZap.metadata_size, gZap.segments);
+    setRow(7, row);
+}
+bool cpSubmit(const uint32_t *words, size_t count, uint32_t *result) {
+    uint32_t fence = 0, seen = 0;
+    if (gRing.submit(words, count, &fence)) {*result = 100; return false;}
+    *result = gRing.wait(fence, &kRingClock, 200000, &seen);
+    return !*result;
+}
+void gpuStart() {
+    char row[64];
+    uint32_t *c = gCp;
+    if (!NativeAdrenoGpuContextBringup || !NativeAdrenoGpuContextBuffers || !&erhai_gpu_sqe_image_size || !&erhai_gpu_zap_image_size) {
+        setRow(5, "S4 nolink");
+        return;
+    }
+    // 1. Slots 0/1 must be unused; their S2CRs go to FAULT first (firmware leaves them translating to a missing bank).
+    volatile uint32_t *smmu = reinterpret_cast<volatile uint32_t *>(gVa[EGB_WIN_SMMU]);
+    c[0] = 1;
+    for (unsigned i = 0; i < 2; ++i) {
+        const unsigned slot = kGpuSlot[i];
+        c[1] |= (smmu[(0xc00 + 4 * slot) / 4] & 0xffff) << (16 * i);
+        if (smmu[(0x800 + 4 * slot) / 4] & 0x80000000u) {setRow(5, "S4 skip: GPU SMR slot valid"); return;}
+        smmu[(0xc00 + 4 * slot) / 4] = 0x20000u;
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (smmu[(0xc00 + 4 * slot) / 4] != 0x20000u) {setRow(5, "S4 skip: s2cr fault"); return;}
+    }
+    erhai_gpu_power_stage = 0x90;
+    gGpuContextStatus = NativeAdrenoGpuContextBringup(reinterpret_cast<volatile uint8_t *>(gVa[EGB_WIN_SMMU]), EGB_SMMU_SIZE,
+        kGpuBank, kGpuAsid, kGpuSlot[0], kGpuSid[0], kGpuSlot[1], kGpuSid[1], gpuContextProgress, &gGpuContext);
+    const NativeAdrenoGmuContextReport &q = gGpuContext;
+    // Q s<step> st<IOReturn> k<program>/<attach kit status> p<phase>e<enabled> r<route phase>v<verified> n<spans>
+    snprintf(row, sizeof row, "Q s%u st%x k%u/%u p%ue%u r%uv%u n%u", q.step, unsigned(gGpuContextStatus), q.program_status,
+             q.route_status, q.program_phase, q.program_enabled, q.route_phase, q.routes_verified, q.spans);
+    setRow(5, row);
+    if (gGpuContextStatus) return;
+    // 2. The five kernel buffers through write-combine CPU views (the context maps them Normal non-cacheable).
+    c[0] = 2;
+    if (NativeAdrenoGpuContextBuffers(gGpuBuffers)) {hwRow(); return;}
+    for (unsigned i = 0; i < 5; ++i) {
+        IODeviceMemory *m = IODeviceMemory::withRange(gGpuBuffers[i].physical, gGpuBuffers[i].bytes);
+        if (m) {
+            gGpuMaps[i] = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapWriteCombineCache), OSNoRetain);
+            m->release();
+        }
+        if (!gGpuMaps[i]) {hwRow(); return;}
+        gGpuCpu[i] = reinterpret_cast<volatile uint8_t *>(gGpuMaps[i]->getVirtualAddress());
+    }
+    // 3. adreno_fw_create_bo: the SQE image without its first dword, read back.
+    c[0] = 3;
+    const uint64_t sqe = erhai_gpu_sqe_image_size;
+    if (sqe < 8 || sqe - 4 > gGpuBuffers[0].bytes) {c[2] = 0xffffffff; hwRow(); return;}
+    for (uint64_t i = 4; i < sqe; ++i) gGpuCpu[0][i - 4] = erhai_gpu_sqe_image[i];
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (uint64_t i = 4; i < sqe && !c[2]; ++i) if (gGpuCpu[0][i - 4] != erhai_gpu_sqe_image[i]) c[2] = uint32_t(i);
+    if (c[2]) {hwRow(); return;}
+    // 4. hw_init up to CP_SQE_INSTR_BASE; the ring (CP_RB_BASE/CNTL, the RPTR shadow at memptrs +0); RPTR_ADDR_BV
+    // (rbmemptr(bv_rptr), memptrs +8) and CP_SQE_CNTL; CP_THREAD_CONTROL + CP_ME_INIT and its fence.
+    c[0] = 4;
+    erhai_gpu_power_stage = 0x94;
+    setRow(6, "H hw_init pre running");
+    const ErhaiGpuHwConfig config = {gGpuBuffers[0].iova, gGpuBuffers[2].iova + 8};
+    c[3] = ErhaiGpuHwInitPre(&gHw, &kHwIo, &config);
+    if (c[3]) {hwRow(); return;}
+    c[0] = 5;
+    if (gRing.attach(&kRingIo, &kRingCache, const_cast<uint8_t *>(gGpuCpu[1]), gGpuBuffers[1].bytes, gGpuBuffers[1].iova,
+                     const_cast<uint8_t *>(gGpuCpu[2]), gGpuBuffers[2].bytes, gGpuBuffers[2].iova)) {hwRow(); return;}
+    c[3] = ErhaiGpuHwInitStartCp(&gHw, &kHwIo, &config);
+    if (c[3]) {hwRow(); return;}
+    c[0] = 6;
+    erhai_gpu_power_stage = 0x96;
+    setRow(6, "H cp init running");
+    const NativeAdrenoCpInitConfig cp = {gGpuBuffers[0].iova, gGpuBuffers[3].iova, 1};
+    uint32_t fence = 0, seen = 0;
+    c[4] = uint32_t(gCpInit.run(&kRingIo, &gRing, &cp, &fence));
+    if (c[4]) {hwRow(); return;}
+    c[5] = gRing.wait(fence, &kRingClock, 200000, &seen);
+    if (c[5]) {hwRow(); return;}
+    // 5. a6xx_zap_shader_init, then CP_SET_SECURE_MODE 0 through the ring. A refused zap ends hw_init (Linux returns its
+    // error there, before the OOB clear).
+    c[0] = 7;
+    erhai_gpu_power_stage = 0x97;
+    setRow(7, "Z zap running");
+    {
+        IODeviceMemory *m = IODeviceMemory::withRange(kZapPhys, kZapBytes);
+        if (m) {gZapMap = OSSharedPtr<IOMemoryMap>(m->map(kIOMapAnywhere | kIOMapWriteCombineCache), OSNoRetain); m->release();}
+    }
+    if (!gZapMap || gZapMetadata.allocate(0x2000, 40, true, 0x2000) || gZapMetadata.spanCount() != 1) {gZapRet = -12; zapRow(); hwRow(); return;}
+    const ErhaiZapIo zapIo = {nullptr, zapPas, zapPublish};
+    const ErhaiZapMemory memory = {static_cast<volatile uint8_t *>(gZapMetadata.mapping()), gZapMetadata.spans()[0].physical, 0x2000,
+                                   reinterpret_cast<volatile uint8_t *>(gZapMap->getVirtualAddress()), kZapPhys, kZapBytes};
+    gZapRet = ErhaiZapLoad(erhai_gpu_zap_image, size_t(erhai_gpu_zap_image_size), kGpuPasId, &zapIo, &memory, &gZap);
+    zapRow();
+    if (gZapRet) {hwRow(); return;}
+    uint32_t secure[2];
+    if (ErhaiGpuSecureModePacket(secure) || !cpSubmit(secure, 2, &c[7])) {if (!c[7]) c[7] = 101; hwRow(); return;}
+    // 6. RB_GC_GMEM_PROTECT, the power-up list, hardware clock gating, OOB GPU_SET cleared.
+    c[0] = 8;
+    erhai_gpu_power_stage = 0x98;
+    size_t written = 0;
+    c[8] = ErhaiGpuHwInitPost(&gHw, &kHwIo, reinterpret_cast<volatile uint32_t *>(gGpuCpu[3]), gGpuBuffers[3].bytes, &written);
+    c[9] = uint32_t(written);
+    __asm__ volatile("dsb sy" ::: "memory");
+    if (c[8]) {hwRow(); return;}
+    // 7. The first command after hw_init: CP_MEM_WRITE (0x3d: address lo/hi, data) into the scratch page, then its fence.
+    c[0] = 9;
+    erhai_gpu_power_stage = 0x99;
+    volatile uint32_t *scratch = reinterpret_cast<volatile uint32_t *>(gGpuCpu[4]);
+    scratch[0] = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+    uint32_t words[4] = {};
+    if (AdrenoPM4Type7(0x3d, 3, &words[0]) != AdrenoPM4Success) {hwRow(); return;}
+    words[1] = uint32_t(gGpuBuffers[4].iova); words[2] = uint32_t(gGpuBuffers[4].iova >> 32); words[3] = 0x5e9a830u;
+    cpSubmit(words, 4, &c[10]);
+    c[11] = scratch[0];
+    // C10: the GPU wrote the scratch word through its own context after a complete hw_init with the zap shader.
+    c[0] = !c[10] && c[11] == 0x5e9a830u ? 10 : 9;
+    erhai_gpu_power_stage = c[0] == 10 ? 0x9a : 0x9f;
+    hwRow();
+}
 void gmuPrerequisites(const egb_result &r) {
     char row[64];
     if (gContextStatus) {setRow(6, "S2 skip: GMU context not ready"); return;}
@@ -596,6 +852,8 @@ void gmuPrerequisites(const egb_result &r) {
     setRow(4, row);
     const size_t used = strnlen(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0]);
     snprintf(boot_progress_ext_wide[0] + used, sizeof boot_progress_ext_wide[0] - used, " gx%x>%x", x[5], x[6]);
+    if (gMode < 9 || x[2] > 100 || (x[4] & 3)) return;
+    gpuStart();
 }
 // The whole report for the panic screen: every shown SMR, and each DT stream's bank registers.
 void dump(const egb_result &r) {
@@ -661,10 +919,10 @@ void watchdogThread(void *, wait_result_t) {
     for (unsigned s = 0; s < 70 && !gFinished; ++s) IOSleep(1000);
     if (gFinished) return;
     const ShengGmuResult &l = gColdResult.load;
-    panic("ERHAI_GPU WATCHDOG m%u stage=%x cpu%d/%d bind%u avail%u/%u scm%lld.%u cold%u ph%u w%u r%u p%u\n"
+    panic("ERHAI_GPU WATCHDOG m%u stage=%x cpu%d/%d bind%u avail%u/%u scm%lld.%u cold%u ph%u w%u r%u p%u cp%u hw%u z%u\n"
           "%.47s\n%.47s\n%.47s\n%.47s\n%.111s\n%.111s\n", gMode, erhai_gpu_power_stage, gProbeCpu, cpu_number(), gBind,
           processor_avail_count, processor_count, static_cast<long long>(gScmRet), gScmResumes, gColdStep, l.phase,
-          l.write_attempts, l.read_attempts, l.poll_reads, boot_progress_ext[4], boot_progress_ext[5], boot_progress_ext[6],
+          l.write_attempts, l.read_attempts, l.poll_reads, gCp[0], gHw.step, gZap.step, boot_progress_ext[4], boot_progress_ext[5], boot_progress_ext[6],
           boot_progress_ext[7], boot_progress_ext_wide[0], boot_progress_ext_wide[1]);
 }
 }
@@ -672,7 +930,7 @@ void watchdogThread(void *, wait_result_t) {
 extern "C" void erhai_gpu_power_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("erhai-gpu-power", &mode, sizeof mode) || !mode || erhai_gpu_power_stage) return;
-    gMode = mode > 8 ? 8 : mode;
+    gMode = mode > 9 ? 9 : mode;
     gBind = processor_count > 1 && processor_avail_count == processor_count;
     erhai_gpu_power_stage = 1;
     thread_t thread = nullptr;

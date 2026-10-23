@@ -1,5 +1,5 @@
 {
-  "_comment": "SHA-pinned inputs for the erhai Adreno 830 GMU (scripts/prepare-erhai-gmu.py). Sources are fetched into .cache/erhai-gpu-source by scripts/fetch-erhai-gpu-inputs.py. The firmware is OEM and never fetched or committed: copy vendor/firmware/gen80000_gmu.bin of the OPD2409_11.C.35 OTA into .cache/firmware/erhai-gpu/qcom.",
+  "_comment": "SHA-pinned inputs for the erhai Adreno 830 GMU (scripts/prepare-erhai-gmu.py). Sources are fetched into .cache/erhai-gpu-source by scripts/fetch-erhai-gpu-inputs.py. The firmware is OEM and never fetched or committed: copy vendor/firmware/gen80000_{gmu.bin,sqe.fw,zap.mbn} of the OPD2409_11.C.35 OTA into .cache/firmware/erhai-gpu/qcom.",
   "linux": {
     "repository": "torvalds/linux",
     "commit": "734bef548a96e8774d6eef5dfa2026c6edc4e80b"
@@ -24,12 +24,142 @@
     "msm-next/drivers/gpu/drm/msm/adreno/a6xx_catalog.c": {
       "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/a6xx_catalog.c",
       "sha256": "39ee1d73c7c6246ef22f37091724a6a43a6552c803b08a62ac4af04f8bfae2b8"
+    },
+    "msm-next/drivers/firmware/qcom/qcom_scm.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/firmware/qcom/qcom_scm.c",
+      "sha256": "4f91ba68daf05099fc45324b7a47d01ac471feb3e9758642aac17d517d97ee88"
+    },
+    "msm-next/drivers/firmware/qcom/qcom_scm.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/firmware/qcom/qcom_scm.h",
+      "sha256": "0998dd9c72d2241ecbe3bbb811d703c115b653d95ba2424d97f2a0ab7adb02b2"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/a6xx_gpu.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/a6xx_gpu.c",
+      "sha256": "8a7c8a090e721799bc607c19c9e5ebf413d8e95ede5509fb685693e595c938d7"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/a6xx_gpu.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/a6xx_gpu.h",
+      "sha256": "7887ffe7798bd72dffc990ef68dcad9d0c160ba41c3253420faa87a0477752b8"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/a8xx_gpu.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/a8xx_gpu.c",
+      "sha256": "dbd7229defb083d5d33256a01bcc8217918a8b47c51f319444b4c3706c943dcc"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/a8xx_preempt.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/a8xx_preempt.c",
+      "sha256": "8a61066170fdac9833456c37124d1da54fca61232f67286a67eb793f5dc8c6bf"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/adreno_gpu.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/adreno_gpu.c",
+      "sha256": "ed4c302b6116c00eceb47ecb8016aba02e4f7b6bb345ab53c77eebc34e8bff98"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/adreno_gpu.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/adreno_gpu.h",
+      "sha256": "12d26fb7f6de4f32b456e25443ab1df9ea28abc4d52866ce2864db0c7b66a088"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a6xx.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a6xx.xml",
+      "sha256": "529cfbcb5f6729e4a5ffde2a7c9c73e4654821b44372ca9ea980f128b3095f33"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a6xx_descriptors.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a6xx_descriptors.xml",
+      "sha256": "6eb6ecd53653a3beb1d09c5855e5550bedc318b410eac870b5a99d8a3c61ce7d"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a6xx_enums.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a6xx_enums.xml",
+      "sha256": "08d56c3ee45ebaa151a8adc7adf7c372ecf89ca72fabc09da1d64645c31f06d4"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a6xx_gmu.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a6xx_gmu.xml",
+      "sha256": "f13f07aa3c975c1d671c1a7f5ba62ddaaf525aedb7a0e481186cbfffe461f88b"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a6xx_perfcntrs.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a6xx_perfcntrs.xml",
+      "sha256": "e9030cfe9aeff35ddddd05e4f58c487394d0decc30198750a77a75dc346b54ff"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a7xx_enums.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a7xx_enums.xml",
+      "sha256": "8649a48eb99b71d3d882ed32021c0afb3400eb6623dc0a10afc2389bef40c497"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a7xx_perfcntrs.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a7xx_perfcntrs.xml",
+      "sha256": "c86cce2b27de6df79d4f68c18c145d42fbf449f4e48dff838bb8ad685af83ce2"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a8xx_descriptors.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a8xx_descriptors.xml",
+      "sha256": "9cd1aef6e79b34e70ab302357b1bf38cebe37fb375aad15b8a06520399eabf51"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a8xx_enums.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a8xx_enums.xml",
+      "sha256": "18d5d8f4871125be7a0fc6d99c33269779532180ced872f33e508be02fc6ceeb"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/a8xx_perfcntrs.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/a8xx_perfcntrs.xml",
+      "sha256": "a0e5e561185977d8d0ce95309a5a836345cdbf003e9a31400212d2bb192e04f0"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/adreno_common.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/adreno_common.xml",
+      "sha256": "f898e4eee3de5f92d25597f003e5550a24fe50552d25555d6916dcd1b922d6f6"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/adreno/adreno_pm4.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/adreno/adreno_pm4.xml",
+      "sha256": "f8137e5d31a3cfce27cba0a8bc269e460067dca9ccb95e620404b7fc752913fb"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/freedreno_copyright.xml": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/freedreno_copyright.xml",
+      "sha256": "16e6fda4963d01a6d2fa6c938a26082d6f0afd0988db7f953c9e4dea38739f2f"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/gen_header.py": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/gen_header.py",
+      "sha256": "81763fc03ea0ebf254ab7427af2113dc0c7c0d80dceab61232b6e371463d1f90"
+    },
+    "msm-next/drivers/gpu/drm/msm/registers/rules-fd.xsd": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/registers/rules-fd.xsd",
+      "sha256": "7489aba32d88e2de4bf0b9979b773c961b84e5058fa21ae2294bb0aa45628968"
+    },
+    "msm-next/drivers/soc/qcom/mdt_loader.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/soc/qcom/mdt_loader.c",
+      "sha256": "2647807e4cabe0c97ba0a872de340f6924f000d27951abdd350f85dead95db6d"
+    },
+    "msm-next/drivers/soc/qcom/ubwc_config.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/soc/qcom/ubwc_config.c",
+      "sha256": "fd33cfccaab1d11cbabb80315640adfb004993e3a4185e9f831b61d7ef2e633c"
+    },
+    "msm-next/include/linux/firmware/qcom/qcom_scm.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/include/linux/firmware/qcom/qcom_scm.h",
+      "sha256": "7c946d7e6509af94b9902f17e572153db88956a815d5897f3730a3abbe647d04"
+    },
+    "msm-next/include/linux/soc/qcom/mdt_loader.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/include/linux/soc/qcom/mdt_loader.h",
+      "sha256": "78f667ddb9fae4a0bb0d3da1291c67991fd65e50c59cfd22cba7688e6a086d50"
+    },
+    "msm-next/include/linux/soc/qcom/ubwc.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/include/linux/soc/qcom/ubwc.h",
+      "sha256": "50e76e143eb78157fdc952cbfc1b6241d790bf99725e31bf976ee4fbc29665b5"
+    },
+    "msm-next/drivers/gpu/drm/msm/msm_ringbuffer.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/msm_ringbuffer.h",
+      "sha256": "e0bf100d94fdbd6663da6fcade2c8bd2d112f7dd26f33e89584575417ddae17f"
+    },
+    "msm-next/drivers/gpu/drm/msm/msm_gpu.h": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/msm_gpu.h",
+      "sha256": "25f31845895f7bb186eeecb9dada6c83568cca7d14fcef0546de89ea99cc85a1"
     }
   },
   "firmware": {
     "qcom/gen80000_gmu.bin": {
       "sha256": "1ad8175e6cd01ea76c64d20b83600038c52dd29844b48d57b11b769b038863a5",
       "bytes": 88896,
+      "source": "OPD2409_11.C.35 OTA vendor/firmware"
+    },
+    "qcom/gen80000_sqe.fw": {
+      "sha256": "9c8f009bea112d7c06dd2ccb67e889999459e53b92f0f4859f5ea0db067ad6b5",
+      "bytes": 111892,
+      "source": "OPD2409_11.C.35 OTA vendor/firmware"
+    },
+    "qcom/gen80000_zap.mbn": {
+      "sha256": "8e4e5da8e0efea0b6dde766bac589731199d0c12e5a9d6b0c4b291b69ba22f78",
+      "bytes": 12088,
       "source": "OPD2409_11.C.35 OTA vendor/firmware"
     }
   }

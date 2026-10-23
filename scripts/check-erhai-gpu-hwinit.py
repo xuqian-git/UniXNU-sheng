@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Host check of package/ErhaiGpuHwInit.c against the pinned msm-next a8xx hw_init.
+
+hw_init and the helpers it calls (a8xx_gpu.c, a8xx_preempt.c, adreno_hw_init, the GMU OOB clear of the pinned a6xx_gmu.c)
+are compiled unchanged as a software oracle in build/erhai-gpu-oracle (generated, never committed). Only the platform is
+substituted: register accessors, the ring writer and the OOB-set/flush/idle/zap/SMMU-aperture calls record into a log.
+package/ErhaiGpuHwInitTests.cpp runs the oracle and the board sequence (ErhaiGpuHwInit with the gen8 NativeAdreno ring and
+CpInit, as mode 9 drives them) over the same register model and compares every register access, the pwrup page and the
+ring words. Software peers only; the tablet run is the evidence."""
+import hashlib, importlib.util, json, re, subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('prepare_erhai_gpu', ROOT / 'scripts/prepare-erhai-gpu.py')
+prepare = importlib.util.module_from_spec(spec); spec.loader.exec_module(prepare)
+GEN = prepare.prepare()
+OUT = ROOT / 'build/erhai-gpu-oracle'
+MSM = prepare.MN / 'drivers/gpu/drm/msm'
+LINUX = ROOT / '.cache/adreno-source'
+pins = json.loads((ROOT / 'scripts/data/adreno-inputs.json').read_text())
+for name in ('drivers/gpu/drm/msm/adreno/a6xx_gmu.c', 'drivers/gpu/drm/msm/adreno/a6xx_gmu.h'):
+    if hashlib.sha256((LINUX / name).read_bytes()).hexdigest() != pins['linux']['files'][name]['sha256']:
+        raise SystemExit('Pinned source differs: ' + name)
+
+
+def braces(source, start):
+    """From `start` through the brace that closes the first `{` after it."""
+    at = source.index('{', start) + 1; depth = 1
+    while depth:
+        depth += {'{': 1, '}': -1}.get(source[at], 0); at += 1
+    return source[start:at]
+
+
+def function(source, signature): return braces(source, source.index(signature))
+
+
+def define(source, name):
+    """A #define as written, continuation lines included."""
+    at = re.search(r'#define ' + re.escape(name) + r'\b', source).start(); end = at
+    while True:
+        line_end = source.index('\n', end)
+        if not source[end:line_end].rstrip().endswith('\\'): return source[at:line_end]
+        end = line_end + 1
+
+
+def struct(source, name): return braces(source, source.index('struct ' + name + ' {')) + ';'
+
+
+read = lambda p: p.read_text()
+a8xx, preempt, adreno_c = read(MSM / 'adreno/a8xx_gpu.c'), read(MSM / 'adreno/a8xx_preempt.c'), read(MSM / 'adreno/adreno_gpu.c')
+adreno_h, a6xx_h, catalog = read(MSM / 'adreno/adreno_gpu.h'), read(MSM / 'adreno/a6xx_gpu.h'), read(MSM / 'adreno/a6xx_catalog.c')
+ring_h, gpu_h = read(MSM / 'msm_ringbuffer.h'), read(MSM / 'msm_gpu.h')
+gmu_c, gmu_h = read(LINUX / 'drivers/gpu/drm/msm/adreno/a6xx_gmu.c'), read(LINUX / 'drivers/gpu/drm/msm/adreno/a6xx_gmu.h')
+ubwc_h, ubwc_c = read(prepare.MN / 'include/linux/soc/qcom/ubwc.h'), read(prepare.MN / 'drivers/soc/qcom/ubwc_config.c')
+
+# The A830 entry: the oracle's a6xx_info carries exactly the fields hw_init reads from it.
+a830 = catalog.index('ADRENO_CHIP_IDS(0x44050001)')
+entry = braces(catalog, catalog.index('.a6xx = &(const struct a6xx_info)', a830))
+for field in ('.protect = &a830_protect,', '.nonctxt_reglist = a830_nonctxt_regs,', '.pwrup_reglist = &a830_pwrup_reglist,',
+              '.dyn_pwrup_reglist = &a830_dyn_pwrup_reglist,', '.ifpc_reglist = &a830_ifpc_reglist,', '.max_slices = 3,'):
+    if field not in entry: raise SystemExit('A830 catalog entry changed: ' + field)
+if 'gmu_cgc_mode' in entry or '.family = ADRENO_8XX_GEN1,' not in catalog[a830:a830 + 200]:
+    raise SystemExit('A830 catalog entry changed: family or gmu_cgc_mode')
+
+lists = '\n'.join(prepare.text_between(catalog, 'static const ' + ('struct adreno_reglist_pipe ' if 'nonctxt' in n or 'dyn' in n else 'u32 ')
+                                       + n + '[] = {', '};') for n in prepare.LISTS)
+declared = '\n'.join(re.search(r'^DECLARE_ADRENO_\w+\(' + n + r'\b.*$', catalog, re.M).group(0)
+                     for n in ('a830_protect', 'a830_pwrup_reglist', 'a830_ifpc_reglist', 'a830_dyn_pwrup_reglist'))
+ubwc_inline = ubwc_h[ubwc_h.index('#define UBWC_1_0'):ubwc_h.index('#endif /* __QCOM_UBWC_H__ */')]
+ubwc_inline = re.sub(r'#if IS_ENABLED\(CONFIG_QCOM_UBWC_CONFIG\).*?#endif\n', '', ubwc_inline, flags=re.S)
+masks = a8xx[a8xx.index('#define A8XX_INT_MASK'):a8xx.index('static int hw_init(')]
+helpers = ['static void a8xx_aperture_slice_set(', 'static void a8xx_aperture_acquire(', 'static void a8xx_aperture_release(',
+           'static void a8xx_aperture_clear(', 'static void a8xx_write_pipe(', 'static u32 a8xx_read_pipe_slice(',
+           'static u32 a8xx_get_first_slice(', 'static void a8xx_set_hwcg(', 'static void a8xx_set_cp_protect(',
+           'static void a8xx_set_ubwc_config(', 'static void a8xx_nonctxt_config(', 'static void a8xx_patch_pwrup_reglist(',
+           'static int a8xx_preempt_start(', 'static int a8xx_cp_init(']
+oob_table = gmu_c.index('static const struct a6xx_gmu_oob_bits a6xx_gmu_oob_bits[] = {')
+nl = '\n'
+
+oracle = f'''/* Generated by scripts/check-erhai-gpu-hwinit.py from pinned Linux sources (GPL-2.0); host test only, never shipped. */
+#define FD_NO_DEPRECATED_PACK 1
+#include <limits.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <strings.h>
+typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u64;typedef int32_t s32;
+static inline uint32_t fui(float f) {{union {{float f;uint32_t u;}} v={{f}};return v.u;}}
+static inline uint16_t _mesa_float_to_half(float f) {{return (uint16_t)fui(f);}}
+static inline uint16_t util_float_to_half(float f) {{return (uint16_t)fui(f);}}
+#define BIT(n) (1u<<(n))
+#define GENMASK(h,l) ((~0u>>(31-(h)))&(~0u<<(l)))
+#define FIELD_PREP(m,v) (((u32)(v)<<__builtin_ctz(m))&(m))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#define lower_32_bits(n) ((u32)(n))
+#define upper_32_bits(n) ((u32)((u64)(n)>>32))
+#define ilog2(n) (31-__builtin_clz(n))
+#define SZ_1M 0x100000u
+#define SZ_32K 0x8000u
+#define SZ_64M 0x04000000u
+#define EINVAL 22
+#define ENODEV 19
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define spin_lock_irqsave(l,f) ((void)(l),(f)=0)
+#define spin_unlock_irqrestore(l,f) ((void)(l),(void)(f))
+#define spin_lock_init(l) ((void)(l))
+#define mutex_is_locked(l) 1
+#define set_bit(b,p) (*(p)|=1ul<<(b))
+#define dev_err(...) ((void)0)
+#define dev_warn_once(...) ((void)0)
+#define DRM_DEV_ERROR(...) ((void)0)
+#define VERB(...) ((void)0)
+#define WARN_ON(x) (x)
+#define WARN_ON_ONCE(x) (x)
+{nl.join(f'#include "{n}.xml.h"' for n in prepare.XMLS)}
+{struct(ubwc_h, 'qcom_ubwc_cfg_data')}
+{ubwc_inline}
+{prepare.text_between(ubwc_c, 'static const struct qcom_ubwc_cfg_data ubwc_5_0_hbb16 = {', '};')}
+{prepare.text_between(adreno_h, 'enum adreno_family {', '};')}
+{struct(adreno_h, 'adreno_reglist')}
+{struct(adreno_h, 'adreno_reglist_pipe')}
+{struct(adreno_h, 'adreno_protect')}
+{define(adreno_h, 'DECLARE_ADRENO_PROTECT')}
+{struct(adreno_h, 'adreno_reglist_list')}
+{define(adreno_h, 'DECLARE_ADRENO_REGLIST_LIST')}
+{struct(adreno_h, 'adreno_reglist_pipe_list')}
+{define(adreno_h, 'DECLARE_ADRENO_REGLIST_PIPE_LIST')}
+{define(a6xx_h, 'A6XX_PROTECT_NORDWR')}
+{define(a6xx_h, 'A6XX_PROTECT_RDONLY')}
+{lists}
+{declared}
+struct a6xx_bcm;struct a6xx_hfi_clx_table_v2_cmd;struct a6xx_limits_tbl;
+{struct(a6xx_h, 'a6xx_info')}
+{struct(a6xx_h, 'cpu_gpu_lock')}
+{define(gpu_h, 'MSM_GPU_RINGBUFFER_SZ')}
+{define(gpu_h, 'MSM_GPU_RINGBUFFER_BLKSIZE')}
+{define(gpu_h, 'MSM_GPU_RB_CNTL_DEFAULT')}
+#define MSM_GPU_SUBMIT_STATS_COUNT 64
+{struct(ring_h, 'msm_gpu_submit_stats')}
+{struct(ring_h, 'msm_rbmemptrs')}
+{define(ring_h, 'rbmemptr')}
+/* The platform: driver structures reduced to the fields these functions use. */
+struct msm_fence_context {{u32 last_fence,completed_fence;}};
+static inline bool fence_before(u32 a,u32 b) {{return (s32)(a-b)<0;}}
+struct msm_ringbuffer {{int id;uint32_t *start,*end,*next,*cur;struct msm_rbmemptrs *memptrs;u64 memptrs_iova,iova;
+    struct msm_fence_context *fctx;u32 cur_ctx_seqno;}};
+struct device {{int unused;}};
+struct platform_device {{struct device dev;}};
+struct drm_device {{struct device *dev;}};
+struct msm_gpu {{const char *name;struct platform_device *pdev;struct drm_device *dev;int nr_rings;struct msm_ringbuffer *rb[1];}};
+struct adreno_info {{enum adreno_family family;const struct a6xx_info *a6xx;}};
+struct adreno_gpu {{struct msm_gpu base;const struct adreno_info *info;u64 uche_trap_base;const struct qcom_ubwc_cfg_data *ubwc_config;}};
+struct a6xx_gmu {{bool legacy;unsigned long status;}};
+struct a6xx_preempt_record {{u32 info,data,cntl,rptr,wptr,_pad;u64 rptr_addr,rbase,counter;}};
+struct a6xx_gpu {{struct adreno_gpu base;u64 sqe_iova,aqe_iova;struct msm_ringbuffer *cur_ring;struct a6xx_gmu gmu;
+    struct a6xx_preempt_record *preempt[1];int eval_lock;u32 cached_aperture;int aperture_lock;u32 slice_mask;u64 shadow_iova;
+    u32 shadow[1];bool pwrup_reglist_emitted;void *pwrup_reglist_ptr;u64 pwrup_reglist_iova;u32 dynamic_sel_reglist_offset;}};
+#define to_adreno_gpu(x) container_of(x, struct adreno_gpu, base)
+#define to_a6xx_gpu(x) container_of(x, struct a6xx_gpu, base)
+{define(a6xx_h, 'shadowptr')}
+void oracle_access(int write,u32 reg,u32 value);u32 oracle_read(u32 reg);void oracle_ring(u32 word);int oracle_event(int id);
+enum {{OracleOobSet=1,OracleAperture,OracleFlush,OracleIdle,OracleZap,OracleOobPerf}};
+static inline void gpu_write(struct msm_gpu *g,u32 reg,u32 v) {{(void)g;oracle_access(1,reg,v);}}
+static inline u32 gpu_read(struct msm_gpu *g,u32 reg) {{(void)g;return oracle_read(reg);}}
+static inline void gpu_write64(struct msm_gpu *g,u32 reg,u64 v) {{gpu_write(g,reg,lower_32_bits(v));gpu_write(g,reg+1,upper_32_bits(v));}}
+static inline void gpu_rmw(struct msm_gpu *g,u32 reg,u32 mask,u32 or) {{u32 v=gpu_read(g,reg);v&=~mask;gpu_write(g,reg,v|or);}}
+/* readl_poll_timeout(…, 1, 10): eleven reads stand for the 10 us budget at 1 us steps. */
+#define gpu_poll_timeout(gpu,addr,val,cond,interval,timeout) ({{int r_=-110;for(int n_=0;n_<11;++n_){{(val)=gpu_read(gpu,addr);if(cond){{r_=0;break;}}}}r_;}})
+static inline void gmu_write(struct a6xx_gmu *g,u32 reg,u32 v) {{(void)g;oracle_access(1,reg,v);}}
+static inline u32 gmu_read(struct a6xx_gmu *g,u32 reg) {{(void)g;return oracle_read(reg);}}
+{function(gmu_h, 'static inline void gmu_rmw(')}
+{prepare.text_between(gmu_h, 'enum a6xx_gmu_oob_state {', '};')}
+static inline void adreno_wait_ring(struct msm_ringbuffer *r,u32 n) {{(void)r;(void)n;}}
+static inline void OUT_RING(struct msm_ringbuffer *r,uint32_t data) {{if(r->next==r->end)r->next=r->start;*(r->next++)=data;oracle_ring(data);}}
+{function(adreno_h, 'static inline u32 PM4_PARITY(')}
+{define(adreno_h, 'PKT7')}
+{function(adreno_h, 'static inline void\nOUT_PKT7(')}
+static inline bool adreno_has_rgmu(const struct adreno_gpu *g) {{(void)g;return false;}}
+static inline int adreno_is_x285(struct adreno_gpu *g) {{(void)g;return 0;}}
+static inline int adreno_is_a830(struct adreno_gpu *g) {{(void)g;return 1;}}
+static bool qcom_scm_set_gpu_smmu_aperture_is_available(void) {{return true;}}
+static int qcom_scm_set_gpu_smmu_aperture(unsigned int cb) {{return cb ? -1 : oracle_event(OracleAperture);}}
+static bool msm_gpu_sysprof_no_perfcntr_zap(struct msm_gpu *g) {{(void)g;return false;}}
+#define GMU_STATUS_OOB_PERF_SET 1
+static int a6xx_gmu_set_oob(struct a6xx_gmu *g,enum a6xx_gmu_oob_state s) {{(void)g;return oracle_event(s==GMU_OOB_GPU_SET?OracleOobSet:OracleOobPerf);}}
+static void a6xx_flush(struct msm_gpu *g,struct msm_ringbuffer *r) {{(void)g;(void)r;oracle_event(OracleFlush);}}
+static bool a8xx_idle(struct msm_gpu *g,struct msm_ringbuffer *r) {{(void)g;(void)r;return !oracle_event(OracleIdle);}}
+static int a6xx_zap_shader_init(struct msm_gpu *g) {{(void)g;return oracle_event(OracleZap);}}
+static void a6xx_emit_set_pseudo_reg(struct msm_ringbuffer *r,struct a6xx_gpu *a,void *p) {{(void)r;(void)a;(void)p;}}
+static void a6xx_flush_yield(struct msm_gpu *g,struct msm_ringbuffer *r) {{(void)g;(void)r;}}
+#define set_preempt_state(a,s) ((void)(a))
+{struct(gmu_c, 'a6xx_gmu_oob_bits')}
+{braces(gmu_c, oob_table)};
+{function(gmu_c, 'void a6xx_gmu_clear_oob(')}
+{function(adreno_c, 'int adreno_hw_init(')}
+{function(preempt, 'void a8xx_preempt_hw_init(')}
+{masks}
+{nl.join(function(a8xx, f) for f in helpers)}
+{function(a8xx, 'static int hw_init(')}
+/* One hw_init on a fresh A830 device model: one ring, slices 0..2 (GEN1 takes them all), no AQE image. a6xx_gpu.c sets
+ * uche_trap_base for every A6XX+ part (prepare-erhai-gpu.py checks that line). */
+int oracle_hw_init(u64 sqe_iova,u64 ring_iova,u64 memptrs_iova,uint32_t *ring,unsigned ring_words,void *pwrup,u64 pwrup_iova)
+{{
+    static const struct a6xx_info info={{.protect=&a830_protect,.nonctxt_reglist=a830_nonctxt_regs,.pwrup_reglist=&a830_pwrup_reglist,
+        .dyn_pwrup_reglist=&a830_dyn_pwrup_reglist,.ifpc_reglist=&a830_ifpc_reglist,.max_slices=3}};
+    static const struct adreno_info ainfo={{.family=ADRENO_8XX_GEN1,.a6xx=&info}};
+    static struct msm_rbmemptrs memptrs;static struct msm_fence_context fctx;static struct platform_device pdev;
+    static struct drm_device drm;static struct msm_ringbuffer rb;static struct a6xx_gpu gpu;
+    memset(&gpu,0,sizeof gpu);memset(&rb,0,sizeof rb);memset(&memptrs,0,sizeof memptrs);memset(&fctx,0,sizeof fctx);
+    rb.start=rb.next=rb.cur=ring;rb.end=ring+ring_words;rb.memptrs=&memptrs;rb.memptrs_iova=memptrs_iova;rb.iova=ring_iova;rb.fctx=&fctx;
+    gpu.base.base.pdev=&pdev;gpu.base.base.dev=&drm;gpu.base.base.nr_rings=1;gpu.base.base.rb[0]=&rb;
+    gpu.base.info=&ainfo;gpu.base.uche_trap_base=0x1fffffffff000ull;gpu.base.ubwc_config=&ubwc_5_0_hbb16;
+    gpu.slice_mask=GENMASK(info.max_slices-1,0);gpu.sqe_iova=sqe_iova;gpu.shadow_iova=memptrs_iova;
+    gpu.pwrup_reglist_ptr=pwrup;gpu.pwrup_reglist_iova=pwrup_iova;
+    return hw_init(&gpu.base.base);
+}}
+'''
+OUT.mkdir(parents=True, exist_ok=True); (OUT / 'inc/IOKit').mkdir(parents=True, exist_ok=True)
+(OUT / 'oracle.c').write_text(oracle)
+for header in ('IOTypes.h', 'IOLib.h'): (OUT / 'inc/IOKit' / header).write_text('#include "XnuMemoryFixture.h"\n')
+NA, PM4, PKG = ROOT / 'drivers/NativeAdreno', ROOT / 'kits/AdrenoPM4', ROOT / 'kits/sheng'
+san = ['-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all']
+run = lambda cmd: subprocess.run(cmd, check=True, timeout=300)
+# The kernel builds with -fno-strict-overflow; a6xx_gmu_clear_oob's `1 << 31` is defined there.
+run(['xcrun', 'clang', '-std=gnu11', *san, '-fno-sanitize=shift', '-w', '-I', str(GEN / 'gen'), '-c', str(OUT / 'oracle.c'), '-o', str(OUT / 'oracle.o')])
+run(['xcrun', 'clang', '-std=gnu11', *san, '-Wall', '-Wextra', '-Werror', '-I', str(GEN), '-I', str(PM4), '-c',
+     str(PKG / 'ErhaiGpuHwInit.c'), '-o', str(OUT / 'ErhaiGpuHwInit.o')])
+run(['xcrun', 'clang', '-std=gnu11', *san, '-I', str(PM4), '-c', str(PM4 / 'AdrenoPM4.c'), '-o', str(OUT / 'AdrenoPM4.o')])
+test = OUT / 'test-erhai-gpu-hwinit'
+run(['xcrun', 'clang++', '-std=gnu++20', *san, '-Wall', '-Wextra', '-Werror', '-DNATIVE_ADRENO_GEN8=1', '-I', str(OUT / 'inc'),
+     '-I', str(NA / 'tests'), '-I', str(NA), '-I', str(PM4), '-I', str(GEN), '-I', str(PKG), str(PKG / 'ErhaiGpuHwInitTests.cpp'),
+     str(NA / 'NativeAdrenoRing.cpp'), str(NA / 'NativeAdrenoCpInit.cpp'), str(OUT / 'oracle.o'), str(OUT / 'ErhaiGpuHwInit.o'),
+     str(OUT / 'AdrenoPM4.o'), '-o', str(test)])
+run([str(test)])
