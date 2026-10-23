@@ -1,0 +1,21 @@
+{
+  "_comment": "S6b: the Mesa that Turnip (darwin backend) is built from for erhai's Adreno 830. mesa-26.1.0 is the first release whose freedreno_devices.py has the A830 (chip id 0x44050001, a8xx_gen1); 26.0 only lists a cffdump placeholder. The patches are UniXNU's patches/mesa rebased onto it (patches/mesa-26.1, in this order). Source and build stay in the ignored .cache of this repository.",
+  "repository": "https://gitlab.freedesktop.org/mesa/mesa.git",
+  "tag": "mesa-26.1.0",
+  "commit": "1d7b6318b9e4f86b4bb5a60c5d5fa873deb6e517",
+  "tree": "418c612253949e040561f6df63977c48b75af75e",
+  "sparse": ["/bin", "/include", "/build-support", "/subprojects", "/src", "/meson.build", "/meson.options", "/VERSION", "/.gitignore"],
+  "patches": [
+    "patches/mesa-26.1/freedreno-tools-nir.patch",
+    "patches/mesa-26.1/ir3-darwin-build-id.patch",
+    "patches/mesa-26.1/ir3-portable-asm-roundtrip.patch",
+    "patches/mesa-26.1/offline-adreno-compiler-probe.patch",
+    "patches/mesa-26.1/turnip-darwin-kmd.patch",
+    "patches/mesa-26.1/turnip-graphics-cache-feedback.patch",
+    "patches/mesa-26.1/turnip-empty-scissor.patch",
+    "patches/mesa-26.1/turnip-builtin-shader-pack.patch",
+    "patches/mesa-26.1/turnip-host-import-images.patch"
+  ],
+  "python": ["meson", "mako", "pyyaml", "packaging"],
+  "tools": ["bison >= 3 (Homebrew)", "glslang", "shaderc (glslc)", "spirv-tools (spirv-val)"]
+}
