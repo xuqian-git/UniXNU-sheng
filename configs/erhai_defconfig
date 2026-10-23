@@ -39,6 +39,7 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="5A6AECE7-BEA6-425E-A5EF-6D26CF1B81D4"
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
-CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/erhai-adreno-stubs/libErhaiAdrenoStubs.a"
+# The adreno-SMMU context part of NativeAdreno (scripts/build-erhai-adreno-context.py) ahead of the stand-ins.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/erhai-adreno-context/libErhaiAdrenoContext.a {tree}/build/erhai-adreno-stubs/libErhaiAdrenoStubs.a"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n

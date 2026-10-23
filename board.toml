@@ -61,6 +61,7 @@ archives = [
   "build-boot-progress.py",
   "build-libpthread-kernel.py",
   "build-native-legacy-display.py",
+  "build-erhai-adreno-context.py",
   "build-erhai-adreno-stubs.py",
 ]
 
