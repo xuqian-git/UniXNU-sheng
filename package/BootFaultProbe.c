@@ -138,14 +138,14 @@ void boot_progress_exit_reason(int pid,unsigned signal,char *out,unsigned long c
  vm_map_t map=current_map();
  vm_map_offset_t addr=0;uint64_t scanned=0;int best=0;
  int thrown=0;
- while(scanned<(160ull<<20) && (best<2 || !thrown)) {
+ while(scanned<(160ull<<20) && (best<3 || !thrown)) {
   vm_map_size_t size=0;natural_t depth=0;vm_region_submap_info_data_64_t info;
   mach_msg_type_number_t count=VM_REGION_SUBMAP_INFO_V2_COUNT_64;
   if(vm_map_region_recurse_64(map,&addr,&size,&depth,(vm_region_submap_info_64_t)&info,&count)!=KERN_SUCCESS)break;
   vm_map_offset_t base=addr;addr+=size;
   if(info.is_submap || (info.protection&(VM_PROT_READ|VM_PROT_WRITE))!=(VM_PROT_READ|VM_PROT_WRITE) ||
      info.user_tag<1 || info.user_tag>11)continue;
-  for(vm_map_offset_t off=0;off<size && (best<2 || !thrown);off+=REASON_CHUNK) {
+  for(vm_map_offset_t off=0;off<size && (best<3 || !thrown);off+=REASON_CHUNK) {
    unsigned long len=(size-off)<REASON_CHUNK?(unsigned long)(size-off):REASON_CHUNK;
    if(copyin((user_addr_t)(base+off),reason_chunk,len))continue;
    scanned+=len;
@@ -155,19 +155,21 @@ void boot_progress_exit_reason(int pid,unsigned signal,char *out,unsigned long c
     if(ok)continue;
     unsigned long run=i-start;
     if(run>=24) {
-     // Rank 2: the full uncaught-exception line; rank 1: any run with a reason clause.
+     // Rank 3: CoreFoundation's uncaught-exception line with the exception's name and reason; rank 2: any uncaught-exception line
+     // (libc++abi's "terminating due to uncaught exception of type NSException" names only the type); rank 1: any run with a reason clause.
      char saved=reason_chunk[i];reason_chunk[i]=0;
      if(!thrown && run>=32 && !strncmp(reason_chunk+start,"SHENGTHROW ",11)) {
       unsigned long m=run<sizeof boot_progress_throw_text-1?run:sizeof boot_progress_throw_text-1;
       memcpy(boot_progress_throw_text,reason_chunk+start,m);boot_progress_throw_text[m]=0;thrown=1;
      }
-     int rank=strnstr(reason_chunk+start,"uncaught exception",run)?2:strnstr(reason_chunk+start,"reason: ",run)?1:0;
+     int uncaught=strnstr(reason_chunk+start,"uncaught exception",run)!=NULL,with_reason=strnstr(reason_chunk+start,"reason: ",run)!=NULL;
+     int rank=uncaught && with_reason?3:uncaught?2:with_reason?1:0;
      if(rank>best) {
       unsigned long m=run<capacity-1?run:capacity-1;
       memcpy(out,reason_chunk+start,m);out[m]=0;best=rank;
      }
      reason_chunk[i]=saved;
-     if(best>=2 && thrown)break;
+     if(best>=3 && thrown)break;
     }
     start=i+1;
    }

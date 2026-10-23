@@ -33,9 +33,10 @@ package is shared unchanged and the branch only adds the board. It tracks `UniXN
 | Native UFS | ✅ | SM8750 controller: identity stage-1 SMMU context, Hibern8 exit before the first command |
 | UFS root (verified OS + SystemOS windows on userdata) | ✅ | |
 | launchd and userspace | ✅ | Needed native PAN (Oryon implements PAN) |
-| Data volume | ⚠️ | RAM-backed (ephemeral); persistent Data not yet |
-| Display | ⚠️ | CPU-rendered NativeLegacyDisplay on the GOP framebuffer (3392x2400); Apple logo shown |
-| SpringBoard / home screen | 🚧 | SpringBoard starts; backboardd and several daemons still exit |
+| Data volume | ⚠️ | RAM-backed (ephemeral), container grown to 4 GiB with `scripts/seed-data-grow.py` (the 32 MiB seed filled up and backboardd died on a nil system-container path); persistent Data not yet |
+| Display | ⚠️ | CPU-rendered NativeLegacyDisplay on the GOP framebuffer (3392x2400) |
+| SpringBoard / lock screen | ✅ | backboardd and SpringBoard stay up; the lock screen is shown (2026-10-23) |
+| Home screen | 🚧 | needs touch or a Home button path |
 | Touch (Novatek NT36536) | ❌ | |
 | GPU (Adreno 830) | ❌ | |
 | Wi-Fi, Bluetooth, audio, camera, USB, battery, suspend | ❌ | |
@@ -63,7 +64,8 @@ From the UniXNU checkout, with this repository at `../UniXNU-erhai` and the erha
 ./unixnu ipsw fetch
 ln -sfn "$PWD/../UEFI-erhai" out/erhai/tree/uefi-sheng   # sheng's BootProgress takes Font.h from the UEFI checkout
 ./unixnu build kernel
-./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle> --data-ramdisk <seed>
+python3 out/erhai/tree/scripts/seed-data-grow.py --gib 4 <seed>.dbr <seed-4g>.dbr   # run from out/erhai/tree
+./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle> --data-ramdisk <seed-4g>.dbr
 python3 ../UniXNU-erhai/scripts/package-erhai-boot.py --uefi ../UEFI-erhai --dtb <erhai.dtb> \
     --payload out/erhai/payload/payload.img -o out/erhai/boot/boot.img
 fastboot boot out/erhai/boot/boot.img

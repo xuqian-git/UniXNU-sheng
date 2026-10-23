@@ -186,7 +186,7 @@ kernel_args = [
   "sheng-lite=1",
   "boot-ui-focus4=SpringBoard",
   "sheng-aks=1",
-  "sheng-banner=0",
+  "sheng-banner=1", "boot-exit-watch=backboardd", "boot-ui-focus3=backboardd",
   "armcpu-spi-ipi=1",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",

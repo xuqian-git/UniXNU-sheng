@@ -28,6 +28,12 @@ extern int proc_selfpid(void);
 #include "BootProgressLifecycle.h"
 static struct bp_exits exit_records,exit_snapshot;
 static unsigned exit_lock,exit_dropped;
+// boot-exit-watch=<process>: that process's latest exit (status row, crash record, abort reason) kept apart from the shared rings, which the
+// crash loops of other daemons overwrite, and drawn on rows 8-14 of the diagnostic page. Guarded by exit_lock like exit_records.
+struct bp_exit_watch {unsigned count;char row[120],crash[400],reason[330],thrown[330];};
+static struct bp_exit_watch exit_watch,exit_watch_snapshot;
+static char exit_watch_name[32];
+static int exit_watch_parsed;
 // Every process name that was exec'd, with its starts, its exits and the second of its first start. The exit records keep only failed exits,
 // so a service that starts, works and ends quietly (or never starts) was invisible; this says which of the system's helpers ran at all (int-201:
 // the wallpaper's extension, Safari's and the widgets' processes).
@@ -284,6 +290,7 @@ static void draw(unsigned now) {
   snprintf(b,sizeof(b),"stage: %.106s",visible->history[latest].text); line(5,b,0xff00ffff);
   if(!__atomic_exchange_n(&exit_lock,1,__ATOMIC_ACQUIRE)) {
     exit_snapshot=exit_records;
+    exit_watch_snapshot=exit_watch;
     __atomic_store_n(&exit_lock,0,__ATOMIC_RELEASE);
   }
   const int trace_visible=&boot_ui_trace_ready && boot_ui_trace_ready;
@@ -344,6 +351,14 @@ static void draw(unsigned now) {
         line(21+r,b,0xff00ff88);
       }
     }
+  }
+  if(exit_watch_snapshot.count) {
+    snprintf(b,sizeof(b),"WATCH %.24s exits=%u %.80s",exit_watch_name,exit_watch_snapshot.count,exit_watch_snapshot.row);
+    line(8,b,0xffff66ff);
+    for(unsigned i=0;i<2;++i)line(9+i,strlen(exit_watch_snapshot.crash)>i*118?exit_watch_snapshot.crash+i*118:"",0xffff66ff);
+    // The abort's reason (the uncaught exception's name and reason from the heap) on three rows, the throw site on the fourth.
+    for(unsigned i=0;i<3;++i)line(11+i,strlen(exit_watch_snapshot.reason)>i*118?exit_watch_snapshot.reason+i*118:"",0xffff66ff);
+    snprintf(b,sizeof(b),"THROW %.112s",exit_watch_snapshot.thrown);line(14,b,0xffff66ff);
   }
   if(&boot_process_rows){
     for(unsigned i=0;i<10;++i)line(i<7?24+i:38+i-7,boot_process_rows[i],0xff00ffff);
@@ -648,6 +663,17 @@ void boot_progress_exit(int pid,const char *name,int status,unsigned ns,uint64_t
     if(&boot_progress_throw_text)boot_progress_throw_text[0]=0;
     boot_progress_exit_reason(pid,signal,exit_records.reason,sizeof(exit_records.reason));
     if(&boot_progress_throw_text && boot_progress_throw_text[0])strlcpy(exit_records.thrown,boot_progress_throw_text,sizeof(exit_records.thrown));
+  }
+  if(!exit_watch_parsed){exit_watch_parsed=1;if(!PE_parse_boot_argn("boot-exit-watch",exit_watch_name,sizeof(exit_watch_name)))exit_watch_name[0]=0;}
+  if(exit_watch_name[0] && name && !strcmp(name,exit_watch_name)) {
+    exit_watch.count++;
+    strlcpy(exit_watch.row,exit_records.recent[(exit_records.total-1)%4],sizeof(exit_watch.row));
+    exit_watch.crash[0]=exit_watch.reason[0]=exit_watch.thrown[0]=0;
+    if(signal>=3 && signal<=12 && signal!=9)strlcpy(exit_watch.crash,exit_records.crash[(exit_records.crashes-1)%3],sizeof(exit_watch.crash));
+    if(signal==6) {
+      strlcpy(exit_watch.reason,exit_records.reason,sizeof(exit_watch.reason));
+      strlcpy(exit_watch.thrown,exit_records.thrown,sizeof(exit_watch.thrown));
+    }
   }
   __atomic_store_n(&exit_lock,0,__ATOMIC_RELEASE);
 }
