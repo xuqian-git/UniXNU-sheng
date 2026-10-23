@@ -189,7 +189,7 @@ kernel_args = [
   "sheng-lite=1",
   "boot-ui-focus4=SpringBoard",
   "sheng-aks=1",
-  "sheng-banner=1", "sheng-data-persist=2", "erhai-touch=4", "sheng-touch-hid=1", "boot-exit-watch=backboardd", "boot-ui-focus3=backboardd",
+  "sheng-banner=1", "legacy-gop-wc=1", "legacy-src-cached=1", "erhai-cpufreq=2", "erhai-cpufreq-cap=2400", "sheng-data-persist=2", "erhai-touch=4", "erhai-touch-orient=6", "sheng-touch-hid=1", "boot-exit-watch=backboardd", "boot-ui-focus3=backboardd",
   "armcpu-spi-ipi=1",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",

@@ -483,6 +483,7 @@ extern void native_keystore_probe(void);
 extern void native_touch_probe(void);
 extern void erhai_touch_probe(void) __attribute__((weak_import));   // the erhai board's touch driver (ErhaiTouchProbe.cpp), when linked
 extern void sheng_cpufreq_probe(void);
+extern void erhai_cpufreq_probe(void) __attribute__((weak_import));   // SM8750 SCMI DVFS (ErhaiCpuFreq.cpp), when linked
 extern void sheng_gpu_power_probe(void);
 extern void sheng_wifi_probe(void);
 extern void sheng_buttons_probe(void);
@@ -490,6 +491,7 @@ extern void sheng_backlight_probe(void);
 void native_legacy_display_late_probe(void) {
     native_keystore_probe();
     sheng_cpufreq_probe();
+    if(&erhai_cpufreq_probe)erhai_cpufreq_probe();
     sheng_gpu_power_probe();
     native_touch_probe();
     if(&erhai_touch_probe)erhai_touch_probe();

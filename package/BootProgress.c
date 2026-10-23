@@ -929,6 +929,9 @@ static void px_text(unsigned x0,unsigned top,const char *text,unsigned cols,uint
   }
 }
 extern volatile uint64_t native_legacy_copy_n __attribute__((weak_import));
+extern volatile uint32_t native_legacy_src_cache __attribute__((weak_import)),native_legacy_src_cached_mode __attribute__((weak_import));
+extern volatile uint64_t native_legacy_src_read_last __attribute__((weak_import)),native_legacy_swap_gap_last __attribute__((weak_import));
+extern volatile uint64_t native_legacy_swap_gap_sum __attribute__((weak_import)),native_legacy_swap_gap_n __attribute__((weak_import));
 extern volatile uint64_t native_gop_gpu_offers __attribute__((weak_import)),native_gop_gpu_completions __attribute__((weak_import)),
   native_gop_gpu_failures __attribute__((weak_import)),native_gop_gpu_abandoned __attribute__((weak_import));
 extern volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak_import)),native_legacy_gpu_last_status __attribute__((weak_import));
@@ -988,6 +991,14 @@ static void crash_banner(unsigned now) {
       (unsigned long long)(native_legacy_copy_sum/c*1000000/f),(unsigned long long)(native_legacy_copy_max*1000000/f),
       (unsigned long long)(native_legacy_copy_bytes_last>>10),(unsigned long long)((native_legacy_copy_bytes_sum/c)>>10));
     banner_copy_n=c;
+  }
+  // Where a swap's time goes (NativeLegacyDisplay): source cache mode, a read-only pass over the source, and the render gap between copies.
+  if(&native_legacy_swap_gap_n && native_legacy_copy_n) {
+    uint64_t f=0;__asm__ volatile("mrs %0, cntfrq_el0":"=r"(f));if(!f)f=19200000;
+    uint64_t g=native_legacy_swap_gap_n;
+    snprintf(rows[n++],120,"FB2   src_cache=%u cached_map=%u read_us=%llu gap_us last=%llu mean=%llu n=%llu",native_legacy_src_cache,native_legacy_src_cached_mode,
+      (unsigned long long)(native_legacy_src_read_last*1000000/f),(unsigned long long)(native_legacy_swap_gap_last*1000000/f),
+      (unsigned long long)(g?native_legacy_swap_gap_sum/g*1000000/f:0),(unsigned long long)g);
   }
   // Data persistence (NativeRamBlock, state as ext_data_rows): whether the store resumed, and what was written through since boot.
   if(&native_data_persist_state && native_data_persist_state)

@@ -311,15 +311,21 @@ bool download(Session &s) {
 
 // Firmware coordinates to TouchProbe's published convention. The firmware's info block names its axis maxima; the longer one is
 // the panel's 3392-px axis (hardware 2026-10-23: abs_x_max 33920, abs_y_max 24000, so x runs along the long axis, unlike the DT's
-// portrait panel-coords). erhai-touch-orient: bit 0 mirrors the long axis, bit 1 the short axis (from a photographed test).
+// portrait panel-coords). erhai-touch-orient: bit 0 mirrors the long axis, bit 1 the short axis, bit 2 swaps which firmware axis
+// is the long one (from photographed tests).
 unsigned gOrient;
 void toPublished(const Session &s, struct nvt_contact &c) {
     const int xMax = s.info.abs_x_max >= 1000 ? s.info.abs_x_max : ETB_FW_Y_MAX;
     const int yMax = s.info.abs_y_max >= 1000 ? s.info.abs_y_max : ETB_FW_X_MAX;
-    int fx = c.x < 0 ? 0 : (c.x >= xMax ? xMax - 1 : c.x), fy = c.y < 0 ? 0 : (c.y >= yMax ? yMax - 1 : c.y);
-    const bool xLong = xMax >= yMax;
-    int longAxis = xLong ? (int)((int64_t)fx * ETB_PUB_X_MAX / xMax) : (int)((int64_t)fy * ETB_PUB_X_MAX / yMax);
-    int shortAxis = xLong ? (int)((int64_t)fy * ETB_PUB_Y_MAX / yMax) : (int)((int64_t)fx * ETB_PUB_Y_MAX / xMax);
+    // The larger maximum is the long axis' range whichever report field carries it; bit 2 says the report's y is the long axis
+    // (hardware 2026-10-23: swipes along the short edge moved x, so the info block's maxima are not per report field).
+    const int longMax = xMax >= yMax ? xMax : yMax, shortMax = xMax >= yMax ? yMax : xMax;
+    const bool xLong = (gOrient & 4) == 0;
+    int fl = xLong ? c.x : c.y, fs = xLong ? c.y : c.x;
+    fl = fl < 0 ? 0 : (fl >= longMax ? longMax - 1 : fl);
+    fs = fs < 0 ? 0 : (fs >= shortMax ? shortMax - 1 : fs);
+    int longAxis = (int)((int64_t)fl * ETB_PUB_X_MAX / longMax);
+    int shortAxis = (int)((int64_t)fs * ETB_PUB_Y_MAX / shortMax);
     if (gOrient & 1) longAxis = ETB_PUB_X_MAX - 1 - longAxis;
     if (gOrient & 2) shortAxis = ETB_PUB_Y_MAX - 1 - shortAxis;
     c.x = longAxis;
