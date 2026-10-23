@@ -554,6 +554,7 @@ void gxOn() {
     erhai_gpu_power_stage = gx ? 0x87 : 0x8f;
 }
 // S4, mode 9: the rest of a8xx hw_init after OOB GPU_SET, in Linux order (research/a830-gpu-plan.md S4).
+extern "C" volatile uint32_t native_adreno_pool_mib, native_adreno_pool_stats[], native_adreno_pool_status;
 extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *, size_t, unsigned, unsigned, unsigned, unsigned, unsigned,
     unsigned, void (*)(uint32_t), NativeAdrenoGmuContextReport *) __attribute__((weak));
 extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5]) __attribute__((weak));
@@ -688,6 +689,15 @@ void gpuStart() {
         if (smmu[(0xc00 + 4 * slot) / 4] != 0x20000u) {setRow(5, "S4 skip: s2cr fault"); return;}
     }
     erhai_gpu_power_stage = 0x90;
+    // S6d: with the Metal device (erhai-gpu-metal=1) the bring-up first takes the BO pool, as sheng's NativeAdrenoService does:
+    // erhai-gpu-pool MiB (default 1536), halved until one contiguous block is had. Without it every BO is scattered pages whose
+    // attribute XNU keeps resetting (sheng int-160). The heartbeat row shows the size taken.
+    unsigned metal = 0;
+    if (PE_parse_boot_argn("erhai-gpu-metal", &metal, sizeof metal) && metal) {
+        unsigned pool = 1536;
+        PE_parse_boot_argn("erhai-gpu-pool", &pool, sizeof pool);
+        native_adreno_pool_mib = pool;
+    }
     gGpuContextStatus = NativeAdrenoGpuContextBringup(reinterpret_cast<volatile uint8_t *>(gVa[EGB_WIN_SMMU]), EGB_SMMU_SIZE,
         kGpuBank, kGpuAsid, kGpuSlot[0], kGpuSid[0], kGpuSlot[1], kGpuSid[1], gpuContextProgress, &gGpuContext);
     const NativeAdrenoGmuContextReport &q = gGpuContext;
@@ -1183,6 +1193,11 @@ struct MetalDiagView {
 };
 extern "C" MetalDiagView native_adreno_metal_diag __attribute__((weak));
 extern "C" volatile int native_gpu_addon_stage __attribute__((weak)), native_gpu_addon_status __attribute__((weak));
+// The display's last rejected swap (LegacyDisplayProbe.cpp; BootProgress shows it on the boot page only): reason (1 validation off, 2 layers,
+// 3 rectangles/options/size, 4 the surface itself), layer state, request size and the surface as the validator read it.
+extern "C" volatile uint32_t native_legacy_swap_rejected_count __attribute__((weak)), native_legacy_rej_reason __attribute__((weak)),
+    native_legacy_rej_state[3] __attribute__((weak)), native_legacy_rej_size[2] __attribute__((weak));
+extern "C" volatile uint64_t native_legacy_rej_surface[7] __attribute__((weak));
 void metalHeartbeat(void *, wait_result_t) {
     char row[64];
     for (unsigned t = 0;; ++t) {
@@ -1201,12 +1216,29 @@ void metalHeartbeat(void *, wait_result_t) {
             at += size_t(snprintf(tail + at, sizeof tail - at, " %x", d.marks[(total - shown + i) & 15]));
         snprintf(row, sizeof row, "K%u%s", total, tail);
         setRow(6, row);
-        // Row 7: the newest opener and starter processes.
-        snprintf(row, sizeof row, "O %.16s S %.16s", d.opener[0], d.starter[0]);
+        // Row 7: the BO pool taken (MiB, its status), the newest opener and starter processes.
+        snprintf(row, sizeof row, "B%u.%x O %.14s S %.14s", native_adreno_pool_stats[0], native_adreno_pool_status, d.opener[0],
+                 d.starter[0]);
         setRow(7, row);
-        // Wide row 1: the Turnip phase's line (T s<stage> r<VkResult> v<fill> c<compute> g<triangle>/<stray>) and the raw test's line.
-        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.63s | R %.40s", d.report2[0] ? d.report2 : "T -",
-                 d.report[0] ? d.report : "-");
+        // Wide row 1: the Turnip phase's line (T s<stage> r<VkResult> v<fill> c<compute> g<triangle>/<stray>), the raw test's line, and
+        // the ring now (G r<RPTR>/<WPTR> s<RBBM_STATUS>): a GPU that stops shows RPTR behind WPTR on every redraw.
+        // Wide row 0 (the S6 facts are on the first photo of each boot): once the display rejects a swap, what it rejected.
+        if (&native_legacy_swap_rejected_count && native_legacy_swap_rejected_count && t >= 3) {
+            const volatile uint64_t *f = native_legacy_rej_surface;
+            snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0],
+                     "REJ n%u r%u st%x/%x/%x wh%ux%u S%llux%llu f%llx pl%llu st%llu al%llu ml%llu", native_legacy_swap_rejected_count,
+                     native_legacy_rej_reason, native_legacy_rej_state[0], native_legacy_rej_state[1], native_legacy_rej_state[2],
+                     native_legacy_rej_size[0], native_legacy_rej_size[1], (unsigned long long)f[0], (unsigned long long)f[1],
+                     (unsigned long long)f[2], (unsigned long long)f[3], (unsigned long long)f[4], (unsigned long long)f[5],
+                     (unsigned long long)f[6]);
+        }
+        // A8XX CP_RB_RPTR 0x806, CP_RB_WPTR 0x807, RBBM_STATUS 0x12 (prepare-erhai-gpu.py's ERHAI_GPU_* values, dwords).
+        uint32_t rptr = 0, wptr = 0, status = 0;
+        hwRead(nullptr, 0x806, &rptr);
+        hwRead(nullptr, 0x807, &wptr);
+        hwRead(nullptr, 0x012, &status);
+        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.44s | %.38s | G r%x/%x s%x", d.report2[0] ? d.report2 : "T -",
+                 d.report[0] ? d.report : "-", rptr, wptr, status);
         IOSleep(2000);
     }
 }

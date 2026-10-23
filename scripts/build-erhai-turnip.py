@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 ERHAI = Path(__file__).resolve().parents[1]
-if not (ERHAI / 'scripts/data/erhai-mesa-inputs.json').is_file():   # run from the build tree: kits/sheng is this package
+if (ERHAI / 'kits/sheng').is_dir():   # run from the build tree (which also carries a copy of scripts/data): kits/sheng is this package
     ERHAI = (ERHAI / 'kits/sheng').resolve().parent
 CACHE = ERHAI / '.cache'
 pin = json.loads((ERHAI / 'scripts/data/erhai-mesa-inputs.json').read_text())
