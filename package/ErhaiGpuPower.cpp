@@ -46,6 +46,8 @@
 //      and sheng's wrapperRound twice through the real IOUserClient path (newUserClient, external methods, clientMemoryForType
 //      mappings, clientClose; round 2 proves the slot recycles). erhai-gpu-metal=1 also registers the staged AGXAccelerator
 //      (IOGPUFamily's IOAcceleratorES, checked against the bound metaclass) for the original Metal discovery. Row 4 and wide row 0.
+//      Once that is published, S6c (metalHeartbeat): rows 5-7 and wide row 1 show, every two seconds, what the owner Metal plugin
+//      (sheng-gpu-addon=1) did through the service, ending in its Turnip line (fill, compute and triangle against the CPU reference).
 // Rows: diagnostic extension slots 4-7 and the two wide rows (the banner's GPU3-GPU6 and GPU7-GPU8, shown with sheng-banner=1).
 // `erhai-gpu-dump=1` additionally panics with the whole report (every valid stream-match entry), one photo of the panic screen,
 // and starts a watchdog that panics with the stage reached if the probe has not finished 70 s after it started.
@@ -1081,7 +1083,7 @@ int wrapperRound(IOService *svc, uint64_t ibIova, uint64_t tgtIova, int &ok, int
     return matched;
 }
 // Stages: 1 kext load attempted, 2 parent metaclass found and equal to the bound one, 3 own class registered, 4 object created
-// and initialised, 5 published. Like sheng's publishMetal; the plugin bundle itself is not on erhai yet (S6c).
+// and initialised, 5 published. Like sheng's publishMetal; the plugin bundle comes from the Data seed (S6c).
 void publishMetal() {
     int32_t *m = gS6 + 11;
     m[0] = 1;
@@ -1170,6 +1172,43 @@ void gpuPublishTest() {
     }
     s6Row();
     erhai_gpu_power_stage = svc && p[5] == 4 && p[6] == 4 && !err ? 0xba : 0xbf;
+}
+// S6c: what the owner Metal plugin (mounted by sheng-gpu-addon=1) did through the published service, redrawn every two seconds
+// for the live diagnostic page (NativeAdrenoPublish's native_adreno_metal_diag; GpuPowerProbe's view of it, which erhai does not run).
+struct MetalDiagView {
+    uint32_t opens, busy, bad, closes, reports, property_reads, foreign_opens, foreign_type, name_reads, calls, last_selector, last_status,
+        ext_entries, ext_selector, ext_status, ext_in, ext_out, tunnel_calls, probes, sel_bits[8], mb_maps, mb_calls, marks_total, marks[16],
+        chk_macf, chk_res, chk_type, type_pass_lo, type_pass_hi, attach_status, inflight, inflight_since_calls, forced_unmaps;
+    char opener[3][17], reader[3][17], name_reader[17], starter[3][17], report[64], report2[64];
+};
+extern "C" MetalDiagView native_adreno_metal_diag __attribute__((weak));
+extern "C" volatile int native_gpu_addon_stage __attribute__((weak)), native_gpu_addon_status __attribute__((weak));
+void metalHeartbeat(void *, wait_result_t) {
+    char row[64];
+    for (unsigned t = 0;; ++t) {
+        const MetalDiagView &d = native_adreno_metal_diag;
+        // Row 5: H<beat> a<addon mount stage>.<status> o<opens>/<refused>/<closed> n<MetalPluginName reads> r<reports> c<calls>
+        //   l<last selector>.<status> i<call in flight + 1> q<GPU interrupts> f<CB0 FSR>
+        snprintf(row, sizeof row, "H%u a%d.%x o%u/%u/%u n%u r%u c%u l%u.%x i%u q%u f%x", t, &native_gpu_addon_stage ? native_gpu_addon_stage : -1,
+                 &native_gpu_addon_status ? unsigned(native_gpu_addon_status) : 0u, d.opens, d.busy, d.closes, d.name_reads, d.reports,
+                 d.calls, d.last_selector, d.last_status, d.inflight, gIrqCount, gpuFsr(0x58));
+        setRow(5, row);
+        // Row 6: the plugin's newest markers (0x4147xxxx open types: 1 started, 3 opened, 3xxx step done, 4xxx step failed, 5xxx reported).
+        char tail[48] = {};
+        const unsigned total = d.marks_total, shown = total < 6 ? total : 6;
+        size_t at = 0;
+        for (unsigned i = 0; i < shown && at < sizeof tail - 6; ++i)
+            at += size_t(snprintf(tail + at, sizeof tail - at, " %x", d.marks[(total - shown + i) & 15]));
+        snprintf(row, sizeof row, "K%u%s", total, tail);
+        setRow(6, row);
+        // Row 7: the newest opener and starter processes.
+        snprintf(row, sizeof row, "O %.16s S %.16s", d.opener[0], d.starter[0]);
+        setRow(7, row);
+        // Wide row 1: the Turnip phase's line (T s<stage> r<VkResult> v<fill> c<compute> g<triangle>/<stray>) and the raw test's line.
+        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.63s | R %.40s", d.report2[0] ? d.report2 : "T -",
+                 d.report[0] ? d.report : "-");
+        IOSleep(2000);
+    }
 }
 void gmuPrerequisites(const egb_result &r) {
     char row[64];
@@ -1267,6 +1306,10 @@ void gmuPrerequisites(const egb_result &r) {
     gpuStart();
     if (gMode >= 10 && gCp[0] == 10) gpuSubmitTest();
     if (gMode >= 11 && erhai_gpu_power_stage == 0xaa) gpuPublishTest();
+    thread_t heartbeat = nullptr;
+    if (erhai_gpu_power_stage == 0xba && gS6[11] == 5 && &native_adreno_metal_diag &&
+        kernel_thread_start(metalHeartbeat, nullptr, &heartbeat) == KERN_SUCCESS)
+        thread_deallocate(heartbeat);
 }
 // The whole report for the panic screen: every shown SMR, and each DT stream's bank registers.
 void dump(const egb_result &r) {

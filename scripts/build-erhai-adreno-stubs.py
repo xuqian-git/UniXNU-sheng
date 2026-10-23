@@ -31,7 +31,11 @@ for archive in CONSUMERS:
     if not archive.is_file():
         sys.exit(f'{archive} missing: run this after build-native-legacy-display.py and build-boot-progress.py')
 wanted = set().union(*(nm(a, '-u') for a in CONSUMERS))
-defined = set().union(*(nm(a, '--defined-only') for a in ROOT.glob('build/**/*.a') if OUT not in a.parents))
+# Only kernel archives can define these: the user-space builds of the Metal plugin (S6c) are skipped.
+USERSPACE = [ROOT / 'build' / name for name in ('native-metal-bridge', 'm2v-target', 'adreno-metal-plugin', 'erhai-turnip-host',
+                                                'turnip-darwin-host', 'mesa-tu', 'mesa-tu-ios')]
+defined = set().union(*(nm(a, '--defined-only') for a in ROOT.glob('build/**/*.a')
+                        if OUT not in a.parents and not any(u == a or u in a.parents for u in USERSPACE)))
 missing = sorted(s for s in wanted - defined if NAMES.search(s))
 
 called = set()
