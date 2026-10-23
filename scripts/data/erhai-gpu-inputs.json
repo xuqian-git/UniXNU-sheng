@@ -1,0 +1,36 @@
+{
+  "_comment": "SHA-pinned inputs for the erhai Adreno 830 GMU (scripts/prepare-erhai-gmu.py). Sources are fetched into .cache/erhai-gpu-source by scripts/fetch-erhai-gpu-inputs.py. The firmware is OEM and never fetched or committed: copy vendor/firmware/gen80000_gmu.bin of the OPD2409_11.C.35 OTA into .cache/firmware/erhai-gpu/qcom.",
+  "linux": {
+    "repository": "torvalds/linux",
+    "commit": "734bef548a96e8774d6eef5dfa2026c6edc4e80b"
+  },
+  "msm_next": {
+    "repository": "drm/msm",
+    "commit": "2c94d177a927a25d3eb111fe83694b5f84239069"
+  },
+  "files": {
+    "drivers/clk/qcom/gpucc-sm8750.c": {
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/drivers/clk/qcom/gpucc-sm8750.c?id=734bef548a96e8774d6eef5dfa2026c6edc4e80b",
+      "sha256": "f0dacb9a457d4e611a65262e313eab62b696863ea6ef8c6a3c1c654c04125557"
+    },
+    "arch/arm64/boot/dts/qcom/sm8750.dtsi": {
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/arch/arm64/boot/dts/qcom/sm8750.dtsi?id=734bef548a96e8774d6eef5dfa2026c6edc4e80b",
+      "sha256": "128164f3bc3f2129ab5ee92af92b67e85b7f89e95469b98185b4da50ea026d3b"
+    },
+    "include/dt-bindings/power/qcom,rpmhpd.h": {
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/include/dt-bindings/power/qcom,rpmhpd.h?id=734bef548a96e8774d6eef5dfa2026c6edc4e80b",
+      "sha256": "764ce97a68ecf5b02cb794815177c82e93e2717cfb6397c1c308bfd7453151f3"
+    },
+    "msm-next/drivers/gpu/drm/msm/adreno/a6xx_catalog.c": {
+      "url": "https://gitlab.freedesktop.org/drm/msm/-/raw/2c94d177a927a25d3eb111fe83694b5f84239069/drivers/gpu/drm/msm/adreno/a6xx_catalog.c",
+      "sha256": "39ee1d73c7c6246ef22f37091724a6a43a6552c803b08a62ac4af04f8bfae2b8"
+    }
+  },
+  "firmware": {
+    "qcom/gen80000_gmu.bin": {
+      "sha256": "1ad8175e6cd01ea76c64d20b83600038c52dd29844b48d57b11b769b038863a5",
+      "bytes": 88896,
+      "source": "OPD2409_11.C.35 OTA vendor/firmware"
+    }
+  }
+}

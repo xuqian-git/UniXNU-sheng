@@ -4,6 +4,14 @@
 /* Generated only from exact pinned XML/catalog/DT/firmware policy; ignored.
  * In particular, no vendor firmware or sequencer payload is stored in Git. */
 #include "ShengGmuSource.h"
+/* The gen8 profile (Adreno 830 on erhai, scripts/prepare-erhai-gmu.py) generates the same header with SHENG_GMU_GEN8 set
+ * and the a8xx differences of a6xx_gmu_fw_start: no RSC/PDC sequence (AOP owns it), no TCM retention, fence range lower
+ * 0x8c0, the CX GBIF list plus GMU_MRC_GBIF_QOS_CTRL, and no PDC window. The A740 header leaves it unset. */
+#ifndef SHENG_GMU_GEN8
+#define SHENG_GMU_GEN8 0
+#define SHENG_GMU_FENCE_LOWER 0x8a0
+#define SHENG_GMU_FIRMWARE_BLOCKS 15
+#endif
 #if !defined(__aarch64__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error sheng GMU requires little-endian AArch64
 #endif
@@ -95,7 +103,7 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
     ShengGmuStatus status=validate(d,c,r);if(status!=ShengGmuSuccess)return status;
     const AdrenoFirmwareRegion regions[]={{0,0x4000,1},{0x4000,0xffc000,2},{0x10004000,0x4000,3}};
     AdrenoFirmwareBlock blocks[32];size_t count=0;
-    if(AdrenoFirmwarePlanGmu(c->firmware,c->firmware_bytes,regions,3,blocks,32,&count)!=AdrenoFirmwareSuccess || count!=15)
+    if(AdrenoFirmwarePlanGmu(c->firmware,c->firmware_bytes,regions,3,blocks,32,&count)!=AdrenoFirmwareSuccess || count!=SHENG_GMU_FIRMWARE_BLOCKS)
         return ShengGmuFirmware;
     r->phase=1;uint32_t value;
     if(core_read(d,REG_GMU_CM3_SYSRESET,&value,r))return ShengGmuIoError;
@@ -110,6 +118,10 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
     status=check_faults(d,r);if(status!=ShengGmuSuccess)return status;
     r->phase=2;
     d->boot_attempted=1;
+#if SHENG_GMU_GEN8
+    if(core_write(d,REG_GPU_GMU_CX_GMU_CX_FALNEXT_INTF,1,r) ||
+        core_write(d,REG_GPU_GMU_CX_GMU_CX_FAL_INTF,1,r) || d->io.barrier(d->io.cookie)) {status=ShengGmuIoError;goto failed;}
+#else
     for(unsigned i=0;i<SHENG_GMU_RSC_SETUP_COUNT;++i) {
         const ShengGmuSetupWrite *w=sheng_gmu_rsc_setup+i;
         if(write32(d,w->window,w->byte_offset,w->value,r)) {status=ShengGmuIoError;goto failed;}
@@ -120,6 +132,7 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
         write32(d,ShengGmuCxMisc,REG_CX_MISC_TCM_RET_CNTL*4,1,r)) {status=ShengGmuIoError;goto failed;}
     if(d->io.barrier(d->io.cookie) || read32(d,ShengGmuCxMisc,REG_CX_MISC_TCM_RET_CNTL*4,&value,r)) {status=ShengGmuIoError;goto failed;}
     if(value!=1) {status=ShengGmuStateMismatch;goto failed;}
+#endif
     /* All shared allocations are real owned coherent memory, not simulated
      * GMU addresses. Zero only after actual stopped/idle checks above. */
     const ShengGmuMemory *memory[]={&c->icache,&c->dummy,&c->debug,&c->log};
@@ -164,11 +177,17 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
         core_write(d,REG_GMU_CM3_BOOT_CONFIG,2,r) ||
         core_write(d,REG_GMU_HFI_QTBL_ADDR,(uint32_t)c->hfi.iova,r) ||
         core_write(d,REG_GMU_HFI_QTBL_INFO,1,r) ||
-        core_write(d,REG_GMU_AHB_FENCE_RANGE_0,UINT32_C(0x80000000)|(0x32u<<18)|0x8a0,r) ||
+        core_write(d,REG_GMU_AHB_FENCE_RANGE_0,UINT32_C(0x80000000)|(0x32u<<18)|SHENG_GMU_FENCE_LOWER,r) ||
         core_write(d,REG_GMU_CM3_CFG,0x4052,r) ||
         core_write(d,REG_GMU_GENERAL_10,SHENG_GMU_FW_CHIP_ID,r) ||
         core_write(d,REG_GMU_GENERAL_8,(uint32_t)c->log.iova|3,r)) {status=ShengGmuIoError;goto failed;}
+#if SHENG_GMU_GEN8
+    for(unsigned i=0;i<SHENG_GMU_GBIF_COUNT;++i)
+        if(write32(d,ShengGmuGpu,sheng_gmu_gbif[i][0]*4,sheng_gmu_gbif[i][1],r)) {status=ShengGmuIoError;goto failed;}
+    if(core_write(d,REG_GMU_MRC_GBIF_QOS_CTRL,SHENG_GMU_MRC_GBIF_QOS,r)) {status=ShengGmuIoError;goto failed;}
+#else
     for(unsigned i=0;i<4;++i)if(write32(d,ShengGmuGpu,(REG_GBIF_QSB_SIDE0+i)*4,0x71620,r)) {status=ShengGmuIoError;goto failed;}
+#endif
     if(core_write(d,REG_GMU_SYS_BUS_CONFIG,1,r) || core_write(d,REG_GMU_ICACHE_CONFIG,1,r) ||
         core_write(d,REG_GMU_DCACHE_CONFIG,1,r) || core_read(d,REG_GMU_CM3_DTCM_START+0xff8,&value,r)) {status=ShengGmuIoError;goto failed;}
     uint32_t mask=value<=UINT32_C(0x20010004)?UINT32_MAX:0x1ff;
@@ -180,7 +199,7 @@ ShengGmuStatus ShengGmuLoadAndStartHfi(ShengGmuDevice *d,const ShengGmuConfig *c
         REG_GMU_GENERAL_8,REG_GMU_AHB_FENCE_RANGE_0,REG_GMU_SYS_BUS_CONFIG,
         REG_GMU_ICACHE_CONFIG,REG_GMU_DCACHE_CONFIG};
     const uint32_t config_values[]={0,2,(uint32_t)c->hfi.iova,1,0x4052,SHENG_GMU_FW_CHIP_ID,
-        (uint32_t)c->log.iova|3,UINT32_C(0x80000000)|(0x32u<<18)|0x8a0,1,1,1};
+        (uint32_t)c->log.iova|3,UINT32_C(0x80000000)|(0x32u<<18)|SHENG_GMU_FENCE_LOWER,1,1,1};
     for(unsigned i=0;i<sizeof(config_regs)/sizeof(config_regs[0]);++i) {
         if(core_read(d,config_regs[i],&value,r)) {status=ShengGmuIoError;goto failed;}
         if(value!=config_values[i]) {status=ShengGmuStateMismatch;goto failed;}
@@ -272,6 +291,13 @@ ShengGmuStatus ShengGmuBindMmio(ShengGmuMmio *m,ShengGmuIo *out)
     if(!m)return ShengGmuArgument;
     for(unsigned i=0;i<ShengGmuWindows;++i) {
         const ShengGmuMmioWindow *w=m->windows+i;
+#if SHENG_GMU_GEN8
+        /* A window the profile has no block for (the PDC on A8xx) stays empty; fits() then refuses every access. */
+        if((SHENG_GMU_UNUSED_WINDOWS>>i)&1) {
+            if(w->cpu || w->physical || w->bytes)return ShengGmuArgument;
+            continue;
+        }
+#endif
         if(!fits(m,i,0) || w->physical!=sheng_gmu_window_physical[i] ||
             w->bytes!=sheng_gmu_window_bytes[i])return ShengGmuArgument;
         for(unsigned j=0;j<i;++j)if(overlap((uintptr_t)w->cpu,w->bytes,(uintptr_t)m->windows[j].cpu,m->windows[j].bytes))return ShengGmuArgument;

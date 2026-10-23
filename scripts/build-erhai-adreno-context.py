@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Archive the part of NativeAdreno that builds an adreno-SMMU context for erhai: the GMU context, its payload allocator, the
-VM and SMMU table memory, and the ArmSmmu4K kit. Nothing generation-specific (GMU firmware, HFI votes, CP, PM4) is included,
-so no sheng firmware or generated GMU source is needed. ErhaiGpuPower.cpp (erhai-gpu-power=4) calls
-NativeAdrenoGmuContextBringup from it; build-erhai-adreno-stubs.py skips every symbol this archive defines, so run it first.
+VM and SMMU table memory, and the ArmSmmu4K kit. ErhaiGpuPower.cpp (erhai-gpu-power=4) calls NativeAdrenoGmuContextBringup
+from it. For the GMU (erhai-gpu-power>=5) it also holds the gen8 profile of the sheng GMU board code (ShengGmu.c,
+ShengGmuVotes.c, ShengGmuCommandDb.c built with the build/erhai-gmu headers of prepare-erhai-gmu.py), the AdrenoFirmware
+kit and, for the cold start (erhai-gpu-power=7), gen80000_gmu.bin as erhai_gmu_firmware_image: assembled from the ignored
+local copy only if it matches the pin in scripts/data/erhai-gpu-inputs.json, so the bytes stay out of Git. build-erhai-adreno-stubs.py skips every symbol this archive defines, so run it first.
 """
+import importlib.util
 import json
 import subprocess
 import sys
@@ -14,7 +17,12 @@ c_recipe = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/D
 cxx_recipe = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 out = ROOT / 'build/erhai-adreno-context'
 out.mkdir(parents=True, exist_ok=True)
+spec = importlib.util.spec_from_file_location('prepare', ROOT / 'scripts/prepare-erhai-gmu.py')
+prepare = importlib.util.module_from_spec(spec); spec.loader.exec_module(prepare)
+gmu_headers, _ = prepare.prepare()
 sources = sorted(p for p in (ROOT / 'kits/ArmSmmu4K').glob('ArmSmmu4K*.c'))
+sources += [ROOT / 'kits/AdrenoFirmware' / (name + '.c') for name in ('AdrenoFirmware', 'AdrenoHfi', 'AdrenoHfiStartup', 'AdrenoHfiVotes')]
+sources += [ROOT / 'kits/sheng' / (name + '.c') for name in ('ShengGmu', 'ShengGmuVotes', 'ShengGmuCommandDb')]
 sources += [ROOT / 'drivers/NativeAdreno' / (name + '.cpp') for name in
             ('NativeAdrenoGmuContext', 'NativeAdrenoGmuMemory', 'NativeAdrenoSmmuContext', 'NativeAdrenoSmmuMemory',
              'NativeAdrenoVm', 'NativeAdrenoMemory', 'NativeAdrenoCpu')]
@@ -37,13 +45,27 @@ for source in sources:
         elif not value.startswith('-W') and value not in ('-MD', '-MP'):
             command.append(value)
         i += 1
-    command += ['-I', str(ROOT / 'kits/ArmSmmu4K'), '-I', str(ROOT / 'drivers/NativeAdreno'), '-I', str(ROOT / '.cache/xnu-work/osfmk'),
+    command += ['-I', str(gmu_headers), '-I', str(ROOT / 'kits/AdrenoFirmware'), '-I', str(ROOT / 'kits/sheng'),
+                '-I', str(ROOT / 'kits/ArmSmmu4K'), '-I', str(ROOT / 'drivers/NativeAdreno'), '-I', str(ROOT / '.cache/xnu-work/osfmk'),
                 '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-incompatible-sysroot', '-Wno-c99-designator',
                 '-Wno-reorder-init-list', '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier']
     result = subprocess.run(command, cwd=recipe['directory'], capture_output=True, text=True)
     if result.returncode:
         sys.exit(str(source) + ':\n' + result.stderr[-2500:])
     objects.append(obj)
+import hashlib
+pin = json.loads((ROOT / 'scripts/data/erhai-gpu-inputs.json').read_text())['firmware']['qcom/gen80000_gmu.bin']
+firmware = ROOT / '.cache/firmware/erhai-gpu/qcom/gen80000_gmu.bin'
+blob = firmware.read_bytes() if firmware.is_file() else b''
+if len(blob) != pin['bytes'] or hashlib.sha256(blob).hexdigest() != pin['sha256']:
+    sys.exit('firmware qcom/gen80000_gmu.bin is missing or does not match its pin')
+label = '_erhai_gmu_firmware_image'
+(out / 'firmware.S').write_text('\n'.join(['.section __DATA_CONST,__const', '.p2align 12', '.globl ' + label, label + ':',
+                                           '.incbin ' + json.dumps(str(firmware.resolve())), label + '_end:', '.p2align 3',
+                                           '.globl ' + label + '_size', label + '_size:', '.quad ' + label + '_end-' + label]) + '\n')
+subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-Wno-incompatible-sysroot', '-c', out / 'firmware.S',
+                '-o', out / 'firmware.o'], check=True)
+objects.append(out / 'firmware.o')
 archive = out / 'libErhaiAdrenoContext.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, *objects], check=True)
@@ -51,10 +73,12 @@ nm = lambda *flags: {line.split()[-1] for line in subprocess.run(['xcrun', 'nm',
                                                                   check=True).stdout.splitlines() if line.strip() and not line.endswith(':')}
 defined, undefined = nm('--defined-only'), nm('-u')
 # Every NativeAdreno/ArmSmmu4K symbol the archive itself needs must be inside it: a stub would turn a call into "return 0".
-open_refs = sorted(s for s in undefined - defined if 'ArmSmmu4K' in s or 'NativeAdreno' in s or 'native_adreno' in s)
+open_refs = sorted(s for s in undefined - defined if any(n in s for n in ('ArmSmmu4K', 'NativeAdreno', 'native_adreno', 'ShengGmu', 'Adreno')))
 if open_refs:
     sys.exit('erhai Adreno context archive is not closed: ' + ', '.join(open_refs))
-for symbol in ('_NativeAdrenoGmuContextBringup', '_NativeAdrenoGmuContextPayloads', '_ArmSmmu4KBindMmio'):
+for symbol in ('_NativeAdrenoGmuContextBringup', '_NativeAdrenoGmuContextPayloads', '_ArmSmmu4KBindMmio', '_ShengGmuColdStart',
+               '_ShengGmuBindMmio', '_ShengGmuBuildStartup', '_ShengGmuCommandDbInputs', '_AdrenoHfiSend',
+               '_erhai_gmu_firmware_image', '_erhai_gmu_firmware_image_size'):
     if symbol not in defined:
         sys.exit('required definition absent: ' + symbol)
 print(f'PASS: erhai Adreno context archive, {len(objects)} objects -> {archive}')

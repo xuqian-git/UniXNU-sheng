@@ -14,6 +14,7 @@ typedef struct {
     ShengGmuBcmInput sh0,mc0,acv;
     uint32_t cn0_address;
     unsigned enable_acd,enable_ifpc;
+    uint32_t speed_bin_fuse; /* gen8 profile only: qfprom speed-bin value that selects the enabled OPPs */
 } ShengGmuVoteInputs;
 /* Build only CPU-side configuration from pinned board OPP/catalog policy and
  * actual cmd-db data supplied by the platform. No device read/write occurs.
