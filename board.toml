@@ -147,15 +147,17 @@ trust_cache_sha256 = [
 # sheng's command line, with erhai's differences:
 #   serial=0            no UART backend on this board (serial=3 panicked in pmap_map_bd during kprintf setup)
 #   kt_fixed_zones=240  120 trips the kalloc type-zone assert on this build (measured on the device)
-#   cpus=1              secondary cores are not brought up on SM8750 yet
+#   sheng-smp=1         secondary cores through PSCI CPU_ON (method smc, as the live DT /firmware/psci)
+#   sheng-cpu0-park=0   all erhai cores are Oryon cores: sheng's boot-core park (an A510 there) would only waste one
 #   native-ufs-smmu=2   the UFS stream is behind the hypervisor: an identity stage-1 context, not a bypass bank
-# Not yet ported (sheng hardware): touch, buttons, backlight, Wi-Fi, CPU frequency, GPU and Metal, AKS, SMP.
+# Not yet ported (sheng hardware): touch, buttons, backlight, Wi-Fi, CPU frequency, GPU and Metal, AKS.
 kernel_args = [
   "-v",
   "serial=0",
   "debug=0x14e",
   "kt_fixed_zones=240",
-  "cpus=1",
+  "sheng-smp=1",
+  "sheng-cpu0-park=0",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
   "offline-legacy-unit-scale=2",
@@ -201,7 +203,9 @@ chip_id = "207"
 # 4 GiB in the high DRAM bank that erhaiPkg gives UEFI (0x8C0000000 + 5 GiB): nothing below 4 GiB is big enough.
 owned_memory_size = "0x100000000"
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
-cpu_regs = "0"                     # one core, matching cpus=1
+# All eight Oryon cores: six in cluster 0 (MPIDR Aff1 0..5) and the two prime cores at 0x10000/0x10100 (Aff2=1). The
+# prime cores need XNU's CPU phys id to keep Aff2 (UniXNU patches/xnu/native-smp-wide-affinity.patch).
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x10000,0x10100"
 packed_data_ramdisk = true         # a volatile RAM Data volume for now (sheng: persistent Data on UFS)
 ipad_identity = true
 unique_chip_id = "required"        # the platform seed is not stored in any repository
