@@ -280,6 +280,9 @@ static void zero32 (void *start, size_t length)
 // (arm_smmu_write_sme). ARM IHI 0062D.c table 3-1 additionally requires VA64=1
 // for inputs above 32 bits even with SCTLR.M=0. Storage DMA path only; this
 // is physical pass-through, not a page-table or Adreno 4 KiB qualification.
+// The identity-mapped stage-1 bank of native-ufs-smmu=2..4, once programmed (~0U before): other DMA masters of this board join
+// it through native_ufs_smmu_share instead of a pass-through bank, which stalls DMA on SM8750.
+static unsigned gIdentityBank = ~0U;
 static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, uint32_t *report,
                               uint64_t dma, uint64_t bytes)
 {
@@ -400,6 +403,7 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
       panic ("NATIVE_UFS smmu: identity context readback sctlr=%x tcr=%x ttbr0=%x", sctlr, read32 (cb, 0x30), read32 (cb, 0x20));
     }
     gRootDiagnostic.sctlr = sctlr;
+    gIdentityBank = bank;
   }
   report[0] = index | (bank << 16);
   report[1] = cbar;
@@ -1287,6 +1291,45 @@ static unsigned storeMode (void)
 }
 
 extern "C" unsigned native_ufs_store_mode (void) { return storeMode (); }
+
+// Map one more stream ID (a DMA master such as the touch controller's serial engine) to the UFS identity context: S2CR first
+// (translate, that bank), then the SMR, as smmuBypassStream does. Returns 0 with the stream-match slot and bank, or a negative
+// reason: -1 no identity bank (native-ufs-smmu is not 2..4), -2 SMMU not mapped, -3 the stream already maps elsewhere,
+// -4 no free stream-match group, -5 readback mismatch.
+extern "C" int native_ufs_smmu_share (uint16_t stream, uint32_t *slotOut, uint32_t *bankOut)
+{
+  if (gIdentityBank == ~0U) return -1;
+  static OSSharedPtr<IOMemoryMap> keep;
+  static uintptr_t smmu;
+  if (!smmu) smmu = mapPhys (UFS_SMMU_BASE, UFS_SMMU_SIZE, keep);
+  if (!smmu) return -2;
+  unsigned count = read32 (smmu, 0x20) & 255, free = ~0U;
+  if (count > 128) count = 128;
+  for (unsigned i = 0; i < count; i++) {
+    uint32_t smr = read32 (smmu, 0x800 + 4 * i);
+    if (!(smr & 0x80000000U)) {
+      if (free == ~0U) free = i;
+      continue;
+    }
+    uint32_t mask = (smr >> 16) & 0x7fff;
+    if (((smr ^ stream) & 0xffff & ~mask) == 0) {
+      uint32_t s2cr = read32 (smmu, 0xc00 + 4 * i);
+      if (((s2cr >> 16) & 3) != 0 || (s2cr & 255) != gIdentityBank) return -3;
+      if (slotOut) *slotOut = i;
+      if (bankOut) *bankOut = gIdentityBank;
+      return 0;
+    }
+  }
+  if (free == ~0U) return -4;
+  write32 (smmu, 0xc00 + 4 * free, gIdentityBank);
+  __asm__ volatile ("dsb sy" ::: "memory");
+  write32 (smmu, 0x800 + 4 * free, 0x80000000U | stream);
+  __asm__ volatile ("dsb sy" ::: "memory");
+  if (read32 (smmu, 0xc00 + 4 * free) != gIdentityBank || read32 (smmu, 0x800 + 4 * free) != (0x80000000U | stream)) return -5;
+  if (slotOut) *slotOut = free;
+  if (bankOut) *bankOut = gIdentityBank;
+  return 0;
+}
 
 // Returns 1 and the first absolute 4096-byte LBA of the window, 0 on refusal (reason in *why, may be null).
 extern "C" int native_ufs_store_open (uint64_t blocks, uint64_t *firstLba, const char **why)

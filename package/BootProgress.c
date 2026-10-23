@@ -996,6 +996,9 @@ static void crash_banner(unsigned now) {
       (unsigned long long)native_data_persist_pages,(unsigned long long)native_data_persist_present,
       (unsigned long long)native_data_persist_loaded,(unsigned long long)native_data_persist_writes,
       (unsigned long long)native_data_persist_syncs,(unsigned long long)native_data_persist_errors);
+  // Touch bring-up status (TouchProbe / ErhaiTouchProbe rows) while a touch stage is requested.
+  if(&native_touch_stage_req && native_touch_stage_req && &native_touch_rows)
+    for(unsigned i=0;i<4 && n<22;++i)if(native_touch_rows[i][0])snprintf(rows[n++],120,"%.119s",native_touch_rows[i]);
   // The display path's counters (the GPU hand-off hides the CPU copy row): swaps the driver validated and how many it took, and the GPU
   // client's offers, completions, failures, abandoned frames, CPU fallbacks and the last fallback status.
   if(&native_legacy_swap_validation_calls && native_legacy_swap_validation_calls) {

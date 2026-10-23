@@ -487,6 +487,10 @@ bool configureClock(Session &s, unsigned hz) {
 }
 }  // namespace
 
+// The publish path (stroke ring, finger-set seqlock, HID sink) for another board's touch driver (kits ErhaiTouchProbe.cpp): contacts in
+// this file's convention, x 0..30479 along the long axis and y 0..20319 mirrored (published y = 20319 - y).
+extern "C" void native_touch_publish(unsigned count, const struct nvt_contact *contacts) {publish(count, contacts);}
+
 // The touch interrupt (GPIO 25): registers per pin at TLMM + 0x1000 * pin, as pinctrl-msm.c / pinctrl-sm8550.c define them: +0x4 IN_OUT (bit 0 the
 // level), +0x8 INTR_CFG (bit 0 enable, bit 1 polarity, bits 3:2 detection 0 level / 1 rising / 2 falling / 3 both, bit 4 raw status enable, bits 7:5
 // target, 3 = the application processor), +0xc INTR_STATUS (bit 0; acknowledged by writing 0, the sm8550 groups set no intr_ack_high). All TLMM
