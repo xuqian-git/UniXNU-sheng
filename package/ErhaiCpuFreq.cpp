@@ -9,7 +9,16 @@
 // agent polls the channel-free bit instead of taking the completion interrupt. `erhai-cpufreq=<n>`:
 //   1  read-only: describe each domain's levels and measure each domain's clock from its cycle counter
 //   2  additionally request each domain's highest level (at or below `erhai-cpufreq-cap=<MHz>` when set)
+//   3  governor: every kTickMs pick each domain's level from its busiest CPU, bounded by a per-domain cap and by a thermal cap that
+//      steps one level down while the domain's hottest TSENS sensor is above `erhai-thermal=<C>` and one level up once it is
+//      `erhai-thermal-hyst=<C>` below it
+// Governor targets follow the stock ColorOS build (init.kernel.post_boot-sun_default_6_2.sh, sys_thermal_control_config.xml):
+// WALT with an 80% target load and no rate limits, hispeed 1344 / 2380.8 MHz above 80% load, floors 537.6 / 844.8 MHz, and the
+// thermal table's first throttle level (2918.4 / 3072 MHz) as the sustained cap. Stock throttles on a computed shell temperature
+// (40-44 C) this driver cannot read yet, so the TSENS target stands in for it. Raises are immediate, decreases one level per tick.
 // `erhai-cpufreq-cnt=0` skips the cycle counters.
+// TSENS (tsens-v2, live DTB): tsens0 TM 0xc228000 sensors 1-14 are cpu-0-*-* and cpuss-0-*, tsens1 TM 0xc229000 sensors 1-6 are
+// cpu-1-*-* and cpuss-1-*; TM_Sn_STATUS at 0xa0 + 4n holds the last reading in bits 11:0 (signed, 0.1 C) and valid in bit 21.
 // The status line goes to native_cpufreq_row (the CPU banner row); CpuFreqProbe must stay off (sheng-cpufreq unset).
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
@@ -17,8 +26,11 @@
 #include <kern/thread.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
+#include <mach/processor_info.h>
 
 extern "C" {
+extern kern_return_t processor_info(processor_t, processor_flavor_t, host_t *, processor_info_t, mach_msg_type_number_t *);
+extern processor_t cpu_to_processor(int);
 extern char native_cpufreq_row[120];
 extern volatile uint32_t native_cpufreq_stage;
 }
@@ -34,15 +46,29 @@ constexpr uint32_t kPerf = 0x13;
 constexpr uint32_t kMsgVersion = 0x0, kMsgDomainAttributes = 0x3, kMsgDescribeLevels = 0x4,
                    kMsgLimitsSet = 0x5, kMsgLevelSet = 0x7, kMsgLevelGet = 0x8;
 constexpr unsigned kDomains = 2;
+constexpr unsigned kMaxLevels = 32, kCpus = 8, kTickMs = 100, kThermalTicks = 5;
+// Logical CPU -> SCMI domain, in the ADT cpu-regs order (0, 0x10000, 0x10100, 0x100 ... 0x500): the 0x1xxxx cores are domain 1.
+constexpr unsigned kCpuDomain[kCpus] = {0, 1, 1, 0, 0, 0, 0, 0};
+constexpr uint64_t kTsensBase[kDomains] = {0xc228000, 0xc229000};
+constexpr unsigned kTsensFirst[kDomains] = {1, 1}, kTsensCount[kDomains] = {14, 6};
+constexpr uint32_t kTmStatus = 0xa0;
 
 struct Domain {
     uint32_t flags, sustainedKHz, levels, minLevel, maxLevel, picked, pickedIndex, setValue;
     int setStatus, limitStatus;
     uint32_t level;     // LEVEL_GET after the vote
     uint32_t mhz;       // measured from the cycle counter
+    uint32_t khz[kMaxLevels], index[kMaxLevels];   // levels in ascending kHz with the value LEVEL_SET takes for each
+    unsigned count, top;     // levels known; highest one under the boot cap
+    unsigned floor, hispeed; // governor's lowest level and the level it jumps to above the target load
+    unsigned current, thermalTop, util;            // governor state: level in use, thermal ceiling, busiest CPU's load (%)
+    int tempDeci;            // hottest sensor (0.1 C)
+    unsigned votes;
 };
-IOMemoryMap *gShmMap, *gBellMap, *gCycleMap[kDomains];
-uintptr_t gShm, gBell, gCycle[kDomains];
+IOMemoryMap *gShmMap, *gBellMap, *gCycleMap[kDomains], *gTsensMap[kDomains];
+uintptr_t gShm, gBell, gCycle[kDomains], gTsens[kDomains];
+int gThermalDeci = 750, gHystDeci = 50;
+uint32_t gFloorKHz[kDomains] = {537600, 844800}, gHispeedKHz[kDomains] = {1344000, 2380800}, gDomainCapKHz[kDomains] = {2918400, 3072000};
 uint32_t gVersion, gToken;
 int gError;
 Domain gDomain[kDomains];
@@ -112,6 +138,13 @@ void describe(unsigned d) {
         for (uint32_t i = 0; i < returned && 1 + (i + 1) * rowWords <= got; ++i) {
             const uint32_t perf = resp[1 + i * rowWords];
             if (perf < dom.minLevel) dom.minLevel = perf;
+            if (dom.count < kMaxLevels) {
+                // Insert sorted by kHz.
+                unsigned at = dom.count++;
+                while (at && dom.khz[at - 1] > perf) {dom.khz[at] = dom.khz[at - 1]; dom.index[at] = dom.index[at - 1]; --at;}
+                dom.khz[at] = perf;
+                dom.index[at] = rowWords == 5 ? resp[1 + i * rowWords + 4] : index + i;
+            }
             if (perf > dom.maxLevel) dom.maxLevel = perf;
             // Without a cap take the top level; with one, the highest level whose kHz (perf on qcom) fits.
             if ((!gCapKHz || perf <= gCapKHz) && perf > dom.picked) {
@@ -122,6 +155,70 @@ void describe(unsigned d) {
         dom.levels = index + returned;
         if (!remaining || !returned) return;
         index += returned;
+    }
+}
+
+bool setLevel(unsigned d, unsigned i) {
+    Domain &dom = gDomain[d];
+    uint32_t resp[1], level[2] = {d, (dom.flags & (1U << 25)) ? dom.index[i] : dom.khz[i]};
+    dom.setStatus = scmiCall(kMsgLevelSet, level, 2, resp, 0, nullptr);
+    if (dom.setStatus) return false;
+    dom.current = i; dom.setValue = level[1]; dom.votes++;
+    return true;
+}
+
+int readTemp(unsigned d) {
+    int hottest = -2730;
+    for (unsigned s = kTsensFirst[d]; gTsens[d] && s < kTsensFirst[d] + kTsensCount[d]; ++s) {
+        const uint32_t v = rd32(gTsens[d], kTmStatus + 4 * s);
+        if (!(v & (1U << 21))) continue;
+        const int t = (int)((v & 0xfff) ^ 0x800) - 0x800;
+        if (t > hottest) hottest = t;
+    }
+    return hottest;
+}
+
+// Busy share (%) of each domain's busiest CPU since the previous call.
+void sampleLoad(unsigned util[kDomains]) {
+    static uint32_t lastBusy[kCpus], lastTotal[kCpus];
+    for (unsigned d = 0; d < kDomains; ++d) util[d] = 0;
+    for (unsigned c = 0; c < kCpus; ++c) {
+        processor_t processor = cpu_to_processor((int)c);
+        if (!processor) continue;
+        processor_cpu_load_info_data_t info = {};
+        mach_msg_type_number_t count = PROCESSOR_CPU_LOAD_INFO_COUNT;
+        host_t host = nullptr;
+        if (processor_info(processor, PROCESSOR_CPU_LOAD_INFO, &host, (processor_info_t)&info, &count) != KERN_SUCCESS) continue;
+        const uint32_t busy = info.cpu_ticks[CPU_STATE_USER] + info.cpu_ticks[CPU_STATE_SYSTEM] + info.cpu_ticks[CPU_STATE_NICE];
+        const uint32_t total = busy + info.cpu_ticks[CPU_STATE_IDLE];
+        const uint32_t db = busy - lastBusy[c], dt = total - lastTotal[c];
+        lastBusy[c] = busy; lastTotal[c] = total;
+        const unsigned u = dt ? db * 100 / dt : 0;
+        if (u > util[kCpuDomain[c]]) util[kCpuDomain[c]] = u;
+    }
+}
+
+void governTick(unsigned tick) {
+    unsigned util[kDomains];
+    sampleLoad(util);
+    for (unsigned d = 0; d < kDomains; ++d) {
+        Domain &dom = gDomain[d];
+        if (!dom.count) continue;
+        dom.util = util[d];
+        if (tick % kThermalTicks == 0) {
+            dom.tempDeci = readTemp(d);
+            if (dom.tempDeci > gThermalDeci && dom.thermalTop > 0) --dom.thermalTop;
+            else if (dom.tempDeci < gThermalDeci - gHystDeci && dom.thermalTop < dom.top) ++dom.thermalTop;
+        }
+        // Lowest level that keeps the busiest CPU at the 80% target (util scaled by the clock it ran at), at least hispeed above it.
+        const uint64_t want = (uint64_t)dom.khz[dom.current] * util[d] / 80;
+        unsigned i = dom.floor;
+        while (i < dom.top && dom.khz[i] < want) ++i;
+        if (util[d] > 80 && i < dom.hispeed) i = dom.hispeed;
+        if (i < dom.current && dom.current > dom.floor) i = dom.current - 1;    // fall one level per tick
+        else if (i < dom.current) i = dom.current;
+        if (i > dom.thermalTop) i = dom.thermalTop;
+        if (i != dom.current || !dom.votes) setLevel(d, i);
     }
 }
 
@@ -143,9 +240,15 @@ void refreshRow() {
     unsigned n = (unsigned)snprintf(out, cap, "SCMI v%x e%d", gVersion, gError);
     for (unsigned d = 0; d < kDomains && n < cap; ++d) {
         const Domain &dom = gDomain[d];
-        n += (unsigned)snprintf(out + n, cap - n, " d%u:f%x n%u %u-%u p%u v%u s%d/%d l%u %uMHz", d, dom.flags >> 24, dom.levels,
-                                dom.minLevel == ~0U ? 0 : dom.minLevel / 1000, dom.maxLevel / 1000, dom.picked / 1000, dom.setValue,
-                                dom.limitStatus, dom.setStatus, dom.level / 1000, dom.mhz);
+        if (gMode >= 3)
+            n += (unsigned)snprintf(out + n, cap - n, " d%u:u%u%% %u/%uMHz T%d.%dC cap%u s%d v%u %uMHz", d, dom.util,
+                                    dom.count ? dom.khz[dom.current] / 1000 : 0, dom.count ? dom.khz[dom.thermalTop] / 1000 : 0,
+                                    dom.tempDeci / 10, (dom.tempDeci < 0 ? -dom.tempDeci : dom.tempDeci) % 10, dom.top,
+                                    dom.setStatus, dom.votes, dom.mhz);
+        else
+            n += (unsigned)snprintf(out + n, cap - n, " d%u:f%x n%u %u-%u p%u v%u s%d/%d l%u %uMHz", d, dom.flags >> 24, dom.levels,
+                                    dom.minLevel == ~0U ? 0 : dom.minLevel / 1000, dom.maxLevel / 1000, dom.picked / 1000,
+                                    dom.setValue, dom.limitStatus, dom.setStatus, dom.level / 1000, dom.mhz);
     }
 }
 
@@ -164,7 +267,13 @@ void cpufreqThread(void *, wait_result_t) {
             dom.flags = resp[0];
             if (got >= 3) dom.sustainedKHz = resp[2];
             describe(d);
-            if (gMode >= 2 && dom.picked) {
+            const uint32_t capKHz = gMode >= 3 ? gDomainCapKHz[d] : gCapKHz;
+            for (dom.top = 0; dom.top + 1 < dom.count && (!capKHz || dom.khz[dom.top + 1] <= capKHz); ++dom.top) {}
+            for (dom.floor = 0; dom.floor < dom.top && dom.khz[dom.floor] < gFloorKHz[d]; ++dom.floor) {}
+            for (dom.hispeed = dom.floor; dom.hispeed < dom.top && dom.khz[dom.hispeed] < gHispeedKHz[d]; ++dom.hispeed) {}
+            dom.current = dom.top;
+            dom.thermalTop = dom.top;
+            if (gMode == 2 && dom.picked) {
                 uint32_t limits[3] = {d, dom.picked, dom.minLevel == ~0U ? dom.picked : dom.minLevel};
                 if (dom.flags & (1U << 31)) dom.limitStatus = scmiCall(kMsgLimitsSet, limits, 3, resp, 0, nullptr);
                 // SCMI v4 domains with level indexing (attribute bit 25) take the level index rather than the performance value; on an
@@ -183,10 +292,10 @@ void cpufreqThread(void *, wait_result_t) {
         }
     }
     native_cpufreq_stage = 2;
-    for (;;) {
-        measure();
-        refreshRow();
-        IOSleep(2000);
+    for (unsigned tick = 0;; ++tick) {
+        if (gMode >= 3 && !gError) governTick(tick);
+        if (tick % 20 == 0) {measure(); refreshRow();}
+        IOSleep(kTickMs);
     }
 }
 }
@@ -205,6 +314,16 @@ extern "C" void erhai_cpufreq_probe(void) {
     for (unsigned d = 0; counters && d < kDomains; ++d) {
         const uintptr_t page = mapRange(kCycleBase[d] & ~0xfffULL, 0x1000, &gCycleMap[d]);
         gCycle[d] = page ? page + (kCycleBase[d] & 0xfff) : 0;
+    }
+    unsigned thermalC = 0, hystC = 0;
+    if (PE_parse_boot_argn("erhai-thermal", &thermalC, sizeof(thermalC)) && thermalC) gThermalDeci = (int)thermalC * 10;
+    if (PE_parse_boot_argn("erhai-thermal-hyst", &hystC, sizeof(hystC)) && hystC) gHystDeci = (int)hystC * 10;
+    // erhai-cpufreq-cap0/1=<MHz> replace the per-domain sustained caps of mode 3 (0 keeps the stock value).
+    for (unsigned d = 0; d < kDomains; ++d) {
+        char name[24]; unsigned mhz = 0;
+        snprintf(name, sizeof(name), "erhai-cpufreq-cap%u", d);
+        if (PE_parse_boot_argn(name, &mhz, sizeof(mhz)) && mhz) gDomainCapKHz[d] = mhz * 1000;
+        gTsens[d] = mapRange(kTsensBase[d], 0x1000, &gTsensMap[d]);
     }
     native_cpufreq_stage = 1;
     if (!gShm || !gBell) {snprintf(native_cpufreq_row, sizeof(native_cpufreq_row), "SCMI nomap"); native_cpufreq_stage = 2; return;}

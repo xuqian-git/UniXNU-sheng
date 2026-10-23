@@ -34,10 +34,11 @@ package is shared unchanged and the branch only adds the board. It tracks `UniXN
 | UFS root (verified OS + SystemOS windows on userdata) | ✅ | |
 | launchd and userspace | ✅ | Needed native PAN (Oryon implements PAN) |
 | Data volume | ✅ | Persistent: the store window at the end of userdata (`sheng-data-persist=2`), seed grown to 210 GiB with `seed-data-grow.py --auto`; resumes across boots with no I/O errors |
-| Display | ⚠️ | CPU-rendered NativeLegacyDisplay on the GOP framebuffer (3392x2400) |
+| Display | ⚠️ | CPU-rendered (QuartzCore's CPU renderer, no GPU) into NativeLegacyDisplay on the GOP framebuffer (3392x2400); cached source reads cut the per-frame copy from ~170 ms to ~16 ms (`patches/NativeMobileDisplay-fast-copy.patch`). Settings stays white (CPU renderer, as on UniXNU's QEMU without Metal) |
 | SpringBoard / lock screen | ✅ | backboardd and SpringBoard stay up; the lock screen is shown (2026-10-23) |
-| Home screen | 🚧 | needs touch or a Home button path |
-| Touch (Novatek NT36536) | ❌ | |
+| Home screen | ✅ | reachable by swiping up; apps launch (2026-10-23) |
+| Touch (Novatek NT36536) | ✅ | `ErhaiTouchProbe`: QUP1 SE4 SPI with SE DMA, firmware download each boot, HID multitouch; taps and swipes verified (`erhai-touch-orient=6`) |
+| CPU DVFS and thermal | ✅ | `ErhaiCpuFreq`: SCMI performance protocol through the CPUCP mailbox; load governor and TSENS limit with stock ColorOS targets (80% load, hispeed, floors, 2918/3072 MHz sustained cap, 75 C) |
 | GPU (Adreno 830) | ❌ | |
 | Wi-Fi, Bluetooth, audio, camera, USB, battery, suspend | ❌ | |
 
