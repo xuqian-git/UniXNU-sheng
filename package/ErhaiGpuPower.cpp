@@ -36,6 +36,11 @@
 //      gen8 NativeAdreno ring attach and CP_ME_INIT; the zap shader (ErhaiZapLoad: PAS 13 into gpu_microcode_mem
 //      0x9b09a000, check-erhai-gpu-zap.py) and CP_SET_SECURE_MODE 0; RB_GC_GMEM_PROTECT, the power-up list, clock gating
 //      and the OOB GPU_SET clear; then one CP_MEM_WRITE to the scratch page with its fence. Rows 5-7 and wide row 1 show it.
+//  10  as 9, then, only after a complete S4, S5 (gpuSubmitTest): the GPU interrupt (SPI 300 = INTID 332, level) attached
+//      through armcpu_spi_attach with NativeAdrenoIrq's a8xx_irq acknowledgement, and one more fence that must raise it; the
+//      CP and GMU always-on counters measured against CNTVCT (19.2 MHz); two rounds through NativeAdrenoUserClient's
+//      dispatch (two objects, the IB's CP_MEM_WRITEs submitted with the a7xx_submit framing, the fence waited, the target
+//      read back, unmap and free; round 2 reuses the IB address), then context bank 0's FSR and the GFSR. Rows 5 and 7.
 // Rows: diagnostic extension slots 4-7 and the two wide rows (the banner's GPU3-GPU6 and GPU7-GPU8, shown with sheng-banner=1).
 // `erhai-gpu-dump=1` additionally panics with the whole report (every valid stream-match entry), one photo of the panic screen,
 // and starts a watchdog that panics with the stage reached if the probe has not finished 70 s after it started.
@@ -51,6 +56,9 @@
 #include "NativeAdrenoGmuContext.h"
 #include "NativeAdrenoGpuContext.h"
 #include "NativeAdrenoCpInit.h"
+#include "NativeAdrenoIrq.h"
+#include "NativeAdrenoTimer.h"
+#include "NativeAdrenoUserClient.h"
 #include "NativeAdrenoMemory.h"
 #include "AdrenoPM4.h"
 #include "ErhaiGpuHwInit.h"
@@ -760,6 +768,182 @@ void gpuStart() {
     erhai_gpu_power_stage = c[0] == 10 ? 0x9a : 0x9f;
     hwRow();
 }
+// S5, mode 10: after a complete S4, the GPU interrupt line, the always-on counter rate and two rounds through the user-client
+// dispatch (research/a830-gpu-plan.md S5). The interrupt decode is NativeAdrenoIrq and the framed submission NativeAdrenoRing,
+// both gen8 and host-compared with a8xx_irq / a7xx_submit by check-erhai-gpu-submit.py.
+extern "C" {
+IOReturn armcpu_spi_attach(uint32_t intid, bool edge, void (*handler)(void *), void *context, uint32_t *readback,
+                           uint64_t *router) __attribute__((weak));
+}
+// SPI 300 of the live DT's gpu interrupts (IRQ_TYPE_LEVEL_HIGH) = INTID 332.
+constexpr uint32_t kGpuIntid = 32 + 300, kIntMask = 0x62;
+NativeAdrenoIrq gIrq;
+NativeAdrenoSubmit gSubmit;
+NativeAdrenoUserClient gClient;
+volatile uint32_t gIrqCount, gIrqSeen, gIrqLast, gIrqEmpty, gIrqFatal;
+// attach status, GICD readback, INT_0_MASK, irqs after attach / after one more fence, fence ok, CP and GMU counter kHz,
+// user-client steps ok / total, first error / at, round 1 / 2 dwords, irqs during the rounds, close, CB0 FSR, GFSR
+uint32_t gS5[20];
+void gpuIrq(void *) {
+    // a8xx_irq: RBBM_INT_0_STATUS read and cleared through RBBM_INT_CLEAR_CMD first, so the level line drops before the EOI.
+    // A line with nothing to clear (a storm) masks the GPU interrupts instead of hanging the CPU it is routed to.
+    NativeAdrenoIrqResult r;
+    if (gIrq.handle(&r)) return;
+    gIrqLast = r.status;
+    gIrqSeen = gIrqSeen | r.status;
+    gIrqCount = gIrqCount + 1;
+    if (r.flags & NativeAdrenoIrqFatal) gIrqFatal = gIrqFatal + 1;
+    gIrqEmpty = r.status ? 0 : gIrqEmpty + 1;
+    if (gIrqEmpty > 100000) hwWrite(nullptr, kIntMask, 0);
+}
+// The always-on counters: CP_ALWAYS_ON_COUNTER (GPU dwords) and GMU_ALWAYS_ON_COUNTER (GMU-window bytes), as NativeAdrenoTimer reads them.
+int timerCpRead(void *, uint32_t reg, uint32_t *value) {return hwRead(nullptr, reg, value);}
+int timerGmuRead(void *, uint32_t offset, uint32_t *value) {
+    if (!gGmuVa[0] || offset >= kGmuLen[0] || (offset & 3)) return 1;
+    *value = gGmuVa[0][offset / 4];
+    return 0;
+}
+uint64_t cntvct() {uint64_t v; __asm__ volatile("isb\n mrs %0, cntvct_el0" : "=r"(v)); return v;}
+// kHz of a counter against CNTVCT (19.2 MHz) over 100 ms; 0 when a read fails.
+uint32_t counterKhz(const NativeAdrenoTimer &t) {
+    uint64_t g0 = 0, g1 = 0;
+    const uint64_t t0 = cntvct();
+    if (t.read(&g0)) return 0;
+    IOSleep(100);
+    const uint64_t t1 = cntvct();
+    if (t.read(&g1) || t1 <= t0) return 0;
+    return uint32_t((g1 - g0) * 19200 / (t1 - t0));
+}
+uint32_t gpuFsr(uint32_t offset) {
+    const uint32_t id1 = gGpuContext.id1, cb = egb_smmu_cb_base(id1) + kGpuBank * egb_smmu_page(id1);
+    if (!gVa[EGB_WIN_SMMU] || !id1 || cb + offset + 4 > EGB_SMMU_SIZE) return 0xdead;
+    return *reinterpret_cast<volatile uint32_t *>(gVa[EGB_WIN_SMMU] + cb + offset);
+}
+IOReturn ucCall(uint32_t method, const void *in, void *out) {
+    char mark[48];
+    snprintf(mark, sizeof mark, "U run m%u", method);
+    setRow(7, mark);
+    const size_t os = NativeAdrenoUserClient::outputSize(method);
+    return gClient.dispatch(method, in, NativeAdrenoUserClient::inputSize(method), os ? out : nullptr, os, &kRingClock);
+}
+// One round through the user-client dispatch, as sheng's ucRound: an IB and a target object mapped at the given GPU addresses,
+// the IB's three CP_MEM_WRITEs into the target, submitted (framed), waited on, read back by the CPU (three written dwords and
+// one untouched), cpu-mapped and unmapped, then unmapped and freed (live SMMU unmap and TLB invalidate). Returns the matching
+// dwords of 4 or -1.
+int ucRound(unsigned round, uint64_t ibIova, uint64_t tgtIova, uint32_t pattern, IOReturn &err, int &errAt, int &ok, int &n) {
+    auto step = [&](IOReturn s) {
+        const int idx = n++;
+        if (!s) ++ok;
+        else if (!err) {err = s; errAt = idx;}
+        return !s;
+    };
+    NativeAdrenoAbiBoAlloc alloc{4096, 12, 0};
+    NativeAdrenoAbiBoAllocReply ib{}, tgt{};
+    if (!step(ucCall(NativeAdrenoMethodBoAlloc, &alloc, &ib)) || !step(ucCall(NativeAdrenoMethodBoAlloc, &alloc, &tgt))) return -1;
+    NativeAdrenoAbiBoMap mapIb{ib.handle, ibIova, 1, 0, 2, 0}, mapTgt{tgt.handle, tgtIova, 3, 0, 2, 0};
+    NativeAdrenoAbiBoMapReply r1{}, r2{};
+    if (!step(ucCall(NativeAdrenoMethodBoMap, &mapIb, &r1)) || !step(ucCall(NativeAdrenoMethodBoMap, &mapTgt, &r2))) return -1;
+    NativeAdrenoMemory *ibMem = gClient.memoryOf(ib.handle), *tgtMem = gClient.memoryOf(tgt.handle);
+    if (!ibMem || !tgtMem) {step(kIOReturnNotFound); return -1;}
+    volatile uint32_t *iw = static_cast<volatile uint32_t *>(ibMem->mapping()), *tw = static_cast<volatile uint32_t *>(tgtMem->mapping());
+    for (unsigned i = 0; i < 1024; ++i) tw[i] = 0xdeadbeef;
+    const uint32_t values[3] = {pattern, ~pattern, 0x600d0000u | round};
+    uint32_t words[12];
+    for (unsigned i = 0; i < 3; ++i) {
+        if (AdrenoPM4Type7(0x3d, 3, &words[i * 4]) != AdrenoPM4Success) {step(kIOReturnInternalError); return -1;}
+        words[i * 4 + 1] = uint32_t(tgtIova + i * 4); words[i * 4 + 2] = uint32_t(tgtIova >> 32); words[i * 4 + 3] = values[i];
+    }
+    for (unsigned i = 0; i < 12; ++i) iw[i] = words[i];
+    if (!step(ibMem->publishForDevice(0, 4096, false)) || !step(tgtMem->publishForDevice(0, 4096, true))) return -1;
+    NativeAdrenoAbiSubmit submit{};
+    submit.buffer_count = 1;
+    submit.buffers[0] = {ib.handle, ibIova, sizeof words};
+    NativeAdrenoAbiSubmitReply sr{};
+    int matched = -1;
+    if (step(ucCall(NativeAdrenoMethodSubmit, &submit, &sr))) {
+        NativeAdrenoAbiWaitFence wait{sr.fence, 200000000ull};
+        if (step(ucCall(NativeAdrenoMethodWaitFence, &wait, nullptr)) && step(tgtMem->acquireDeviceWrites(0, 4096)))
+            matched = (tw[0] == values[0]) + (tw[1] == values[1]) + (tw[2] == values[2]) + (tw[3] == 0xdeadbeef);
+    }
+    NativeAdrenoAbiBoCpuMap cm{tgt.handle};
+    NativeAdrenoAbiBoCpuMapReply cr{};
+    if (step(ucCall(NativeAdrenoMethodBoCpuMap, &cm, &cr))) {
+        NativeAdrenoAbiBoCpuUnmap cu{tgt.handle, cr.token, 0};
+        step(ucCall(NativeAdrenoMethodBoCpuUnmap, &cu, nullptr));
+    }
+    NativeAdrenoAbiBoFree f1{ib.handle}, f2{tgt.handle};
+    step(ucCall(NativeAdrenoMethodBoFree, &f1, nullptr));
+    step(ucCall(NativeAdrenoMethodBoFree, &f2, nullptr));
+    return matched;
+}
+void s5Rows() {
+    // Row 5: I a<attach> b<GICD readback> k<INT_0_MASK> n<irqs after attach>/<after a fence><fence ok> l<status seen>
+    //   T<CP counter kHz>/<GMU counter kHz>
+    // Row 7: U ok<steps ok>/<steps> e<first error>@<step> v<round 1>/<round 2 dwords of 4> q<irqs> c<close> s<CB0 FSR> G<GFSR>
+    char row[64];
+    const uint32_t *u = gS5;
+    snprintf(row, sizeof row, "I a%x b%x k%x n%u/%u%c l%x T%u/%u", u[0], u[1], u[2], u[3], u[4], u[5] ? '+' : '-', gIrqSeen,
+             u[6], u[7]);
+    setRow(5, row);
+    snprintf(row, sizeof row, "U ok%u/%u e%x@%d v%d/%d q%u c%x s%x G%x", u[8], u[9], u[10], int(u[11]), int(u[12]), int(u[13]),
+             u[14], u[15], u[16], u[17]);
+    setRow(7, row);
+}
+void gpuSubmitTest() {
+    uint32_t *u = gS5;
+    u[11] = uint32_t(-1); u[12] = u[13] = uint32_t(-1);
+    erhai_gpu_power_stage = 0xa0;
+    setRow(5, "I irq attach running");
+    // 1. The interrupt line. The S4 fences left CP_CACHE_FLUSH_TS set, so a working line fires as soon as it is enabled; one
+    // more fence must fire it again.
+    uint32_t readback = 0;
+    uint64_t router = ~0ull;
+    if (!gIrq.attach(&kRingIo)) {
+        u[0] = armcpu_spi_attach ? uint32_t(armcpu_spi_attach(kGpuIntid, false, gpuIrq, nullptr, &readback, &router)) : 0xdead;
+    } else {
+        u[0] = 0xbad;
+    }
+    u[1] = readback;
+    hwRead(nullptr, kIntMask, &u[2]);
+    IOSleep(20);
+    u[3] = gIrqCount;
+    uint32_t nop = 0, result = 0;
+    u[5] = AdrenoPM4Type7(0x10, 0, &nop) == AdrenoPM4Success && cpSubmit(&nop, 1, &result);
+    IOSleep(20);
+    u[4] = gIrqCount;
+    s5Rows();
+    // 2. The always-on counters against CNTVCT.
+    erhai_gpu_power_stage = 0xa1;
+    NativeAdrenoTimer cp, gmu;
+    const NativeAdrenoTimeIo cpIo{nullptr, timerCpRead}, gmuIo{nullptr, timerGmuRead};
+    if (!cp.attach(&cpIo, NativeAdrenoTimeCp)) u[6] = counterKhz(cp);
+    if (!gmu.attach(&gmuIo, NativeAdrenoTimeGmu)) u[7] = counterKhz(gmu);
+    s5Rows();
+    // 3. Two user-client rounds. Round 2 reuses the IB address with a new object (a stale TLB entry would run the old IB, which
+    // writes to the now unmapped round-1 target and faults) and maps its target at a fresh address.
+    erhai_gpu_power_stage = 0xa2;
+    NativeAdrenoVm *vm = NativeAdrenoGpuContextVm();
+    IOReturn err = 0;
+    int errAt = -1, ok = 0, n = 0;
+    IOReturn opened = !vm ? kIOReturnNotReady : gSubmit.attach(vm, &gRing);
+    // input_bits 31: the 2 GiB TTBR0 aperture; output_bits from the SMMU's ID2.OAS
+    if (!opened) opened = gClient.open(NativeAdrenoAbiVersion, vm, &gSubmit, &gRing, 31, gGpuContext.output_bits);
+    if (opened) {err = opened; errAt = 0; u[10] = uint32_t(err); u[11] = 0; s5Rows(); return;}
+    const uint32_t irq0 = gIrqCount;
+    erhai_gpu_power_stage = 0xa3;
+    const int v1 = ucRound(1, 0x10000000, 0x10001000, 0x5e9a8300u, err, errAt, ok, n);
+    erhai_gpu_power_stage = 0xa4;
+    const int v2 = ucRound(2, 0x10000000, 0x10002000, 0xa830b0b0u, err, errAt, ok, n);
+    u[8] = uint32_t(ok); u[9] = uint32_t(n); u[10] = uint32_t(err); u[11] = uint32_t(errAt);
+    u[12] = uint32_t(v1); u[13] = uint32_t(v2);
+    u[14] = gIrqCount - irq0;
+    u[15] = uint32_t(gClient.close());
+    u[16] = gpuFsr(0x58);
+    u[17] = gVa[EGB_WIN_SMMU] ? *reinterpret_cast<volatile uint32_t *>(gVa[EGB_WIN_SMMU] + EGB_SMMU_GFSR) : 0xdead;
+    s5Rows();
+    // arm-smmu's ARM_SMMU_CB_FSR_FAULT bits (MULTI, SS, UUT, ASF, TLBLKF, TLBMCF, EF, PF, AFF, TF); FORMAT (bits 9..10) is no fault.
+    erhai_gpu_power_stage = v1 == 4 && v2 == 4 && !(u[16] & 0xc00001feu) && u[4] > u[3] ? 0xaa : 0xaf;
+}
 void gmuPrerequisites(const egb_result &r) {
     char row[64];
     if (gContextStatus) {setRow(6, "S2 skip: GMU context not ready"); return;}
@@ -854,6 +1038,7 @@ void gmuPrerequisites(const egb_result &r) {
     snprintf(boot_progress_ext_wide[0] + used, sizeof boot_progress_ext_wide[0] - used, " gx%x>%x", x[5], x[6]);
     if (gMode < 9 || x[2] > 100 || (x[4] & 3)) return;
     gpuStart();
+    if (gMode >= 10 && gCp[0] == 10) gpuSubmitTest();
 }
 // The whole report for the panic screen: every shown SMR, and each DT stream's bank registers.
 void dump(const egb_result &r) {
@@ -930,7 +1115,7 @@ void watchdogThread(void *, wait_result_t) {
 extern "C" void erhai_gpu_power_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("erhai-gpu-power", &mode, sizeof mode) || !mode || erhai_gpu_power_stage) return;
-    gMode = mode > 9 ? 9 : mode;
+    gMode = mode > 10 ? 10 : mode;
     gBind = processor_count > 1 && processor_avail_count == processor_count;
     erhai_gpu_power_stage = 1;
     thread_t thread = nullptr;

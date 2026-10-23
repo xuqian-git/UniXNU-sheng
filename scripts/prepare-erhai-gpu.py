@@ -132,6 +132,29 @@ def macro(source, name):
         end = line_end + 1
 
 
+def braces(source, start):
+    """From `start` through the brace that closes the first `{` after it."""
+    at = source.index('{', start) + 1; depth = 1
+    while depth:
+        depth += {'{': 1, '}': -1}.get(source[at], 0); at += 1
+    return source[start:at]
+
+
+def function(source, signature): return braces(source, source.index(signature))
+
+
+def define(source, name):
+    """A #define as written, continuation lines included (the host oracles of check-erhai-gpu-*.py)."""
+    at = re.search(r'#define ' + re.escape(name) + r'\b', source).start(); end = at
+    while True:
+        line_end = source.index('\n', end)
+        if not source[end:line_end].rstrip().endswith('\\'): return source[at:line_end]
+        end = line_end + 1
+
+
+def struct(source, name): return braces(source, source.index('struct ' + name + ' {')) + ';'
+
+
 def generate_headers():
     (OUT / 'gen').mkdir(parents=True, exist_ok=True)
     for name in XMLS:

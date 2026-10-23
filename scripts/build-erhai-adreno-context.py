@@ -8,7 +8,8 @@ local copy only if it matches the pin in scripts/data/erhai-gpu-inputs.json, so 
 (erhai-gpu-power=9) it adds the GPU's own context, ring and CP init of NativeAdreno built as its gen8 (A8XX) profile, the
 AdrenoPM4 kit, the erhai hw_init and zap loader (ErhaiGpuHwInit.c with build/erhai-gpu of prepare-erhai-gpu.py,
 ErhaiGpuZap.c), and gen80000_sqe.fw / gen80000_zap.mbn as erhai_gpu_sqe_image / erhai_gpu_zap_image, pin-checked the same
-way. build-erhai-adreno-stubs.py skips every symbol this archive defines, so run it first.
+way. For S5 (erhai-gpu-power=10) it adds NativeAdreno's interrupt decode, always-on timer, submission and user client, gen8
+as well. build-erhai-adreno-stubs.py skips every symbol this archive defines, so run it first.
 """
 import importlib.util
 import json
@@ -35,7 +36,7 @@ sources += [ROOT / 'kits/sheng' / (name + '.c') for name in ('ShengGmu', 'ShengG
 sources += [ROOT / 'drivers/NativeAdreno' / (name + '.cpp') for name in
             ('NativeAdrenoGmuContext', 'NativeAdrenoGmuMemory', 'NativeAdrenoSmmuContext', 'NativeAdrenoSmmuMemory',
              'NativeAdrenoVm', 'NativeAdrenoMemory', 'NativeAdrenoCpu', 'NativeAdrenoGpuContext', 'NativeAdrenoRing',
-             'NativeAdrenoCpInit')]
+             'NativeAdrenoCpInit', 'NativeAdrenoIrq', 'NativeAdrenoTimer', 'NativeAdrenoSubmit', 'NativeAdrenoUserClient')]
 objects = []
 for source in sources:
     recipe = c_recipe if source.suffix == '.c' else cxx_recipe
@@ -95,7 +96,7 @@ for symbol in ('_NativeAdrenoGmuContextBringup', '_NativeAdrenoGmuContextPayload
                '_erhai_gmu_firmware_image', '_erhai_gmu_firmware_image_size', '_NativeAdrenoGpuContextBringup',
                '_NativeAdrenoGpuContextBuffers', '_ErhaiGpuHwInitPre', '_ErhaiGpuHwInitStartCp', '_ErhaiGpuHwInitPost',
                '_ErhaiGpuSecureModePacket', '_ErhaiGpuHwSnapshot', '_ErhaiZapLoad', '_AdrenoPM4Type7', '_erhai_gpu_sqe_image',
-               '_erhai_gpu_sqe_image_size', '_erhai_gpu_zap_image', '_erhai_gpu_zap_image_size'):
+               '_erhai_gpu_sqe_image_size', '_erhai_gpu_zap_image', '_erhai_gpu_zap_image_size', '_NativeAdrenoGpuContextVm'):
     if symbol not in defined:
         sys.exit('required definition absent: ' + symbol)
 print(f'PASS: erhai Adreno context archive, {len(objects)} objects -> {archive}')
