@@ -243,3 +243,9 @@ void ErhaiGpuHwSnapshot(const ErhaiGpuIo *io, uint32_t out[6])
     for (unsigned i = 0; i < 6; ++i)
         if (!io || !io->read32 || io->read32(io->cookie, regs[i], &out[i])) out[i] = 0xdeadbeef;
 }
+void ErhaiGpuDeviceFacts(ErhaiGpuFacts *out)
+{
+    *out = (ErhaiGpuFacts){ERHAI_GPU_CHIP_ID, ERHAI_GPU_GMEM_BYTES, ERHAI_GPU_GMEM_RANGE_MIN_VALUE, ERHAI_GPU_UCHE_TRAP_BASE_VALUE,
+                           ERHAI_GPU_UBWC_HIGHEST_BANK_BIT, ERHAI_GPU_UBWC_SWIZZLE, ERHAI_GPU_UBWC_MACROTILE,
+                           ERHAI_GPU_UBWC_ENC_VERSION >> 28};
+}

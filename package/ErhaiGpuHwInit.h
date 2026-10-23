@@ -46,6 +46,15 @@ ErhaiGpuStatus ErhaiGpuHwInitPost(ErhaiGpuHw *, const ErhaiGpuIo *, volatile uin
 void ErhaiGpuHwSnapshot(const ErhaiGpuIo *, uint32_t out[6]);
 /* The ring words hw_init sends once the zap shader is up: CP_SET_SECURE_MODE with 0 (leave secure mode). Zero on success. */
 int ErhaiGpuSecureModePacket(uint32_t words[2]);
+/* The facts the user client reports to the Vulkan driver, from the pinned sources: the a6xx_catalog.c A830 entry (chip id,
+ * gmem), the GMEM window hw_init programs (UCHE_CCHE/SP_HLSQ GMEM_RANGE_MIN), uche_trap_base, and sm8750's UBWC configuration
+ * (ubwc_config.c ubwc_5_0_hbb16 through ubwc.h: bank bit, swizzle levels, macrotile mode, encoder major version). */
+typedef struct {
+    uint32_t chip_id, gmem_bytes;
+    uint64_t gmem_base, uche_trap_base;
+    uint32_t highest_bank_bit, ubwc_swizzle, macrotile_mode, ubwc_version;
+} ErhaiGpuFacts;
+void ErhaiGpuDeviceFacts(ErhaiGpuFacts *);
 #ifdef __cplusplus
 }
 #endif

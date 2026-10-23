@@ -41,6 +41,11 @@
 //      CP and GMU always-on counters measured against CNTVCT (19.2 MHz); two rounds through NativeAdrenoUserClient's
 //      dispatch (two objects, the IB's CP_MEM_WRITEs submitted with the a7xx_submit framing, the fence waited, the target
 //      read back, unmap and free; round 2 reuses the IB address), then context bank 0's FSR and the GFSR. Rows 5 and 7.
+//  11  as 10, then, only after a complete S5, S6a (gpuPublishTest): NativeAdrenoPublish's service and AGXDeviceUserClient
+//      published with the A830 facts (ErhaiGpuDeviceFacts: catalog chip id and gmem, the hw_init GMEM window, sm8750 UBWC 5),
+//      and sheng's wrapperRound twice through the real IOUserClient path (newUserClient, external methods, clientMemoryForType
+//      mappings, clientClose; round 2 proves the slot recycles). erhai-gpu-metal=1 also registers the staged AGXAccelerator
+//      (IOGPUFamily's IOAcceleratorES, checked against the bound metaclass) for the original Metal discovery. Row 4 and wide row 0.
 // Rows: diagnostic extension slots 4-7 and the two wide rows (the banner's GPU3-GPU6 and GPU7-GPU8, shown with sheng-banner=1).
 // `erhai-gpu-dump=1` additionally panics with the whole report (every valid stream-match entry), one photo of the panic screen,
 // and starts a watchdog that panics with the stage reached if the probe has not finished 70 s after it started.
@@ -59,6 +64,11 @@
 #include "NativeAdrenoIrq.h"
 #include "NativeAdrenoTimer.h"
 #include "NativeAdrenoUserClient.h"
+#include <IOKit/IOUserClient.h>
+#include <IOKit/IOPlatformExpert.h>
+#include <libkern/c++/OSMetaClass.h>
+#include <libkern/c++/OSSymbol.h>
+#include <mach/kmod.h>
 #include "NativeAdrenoMemory.h"
 #include "AdrenoPM4.h"
 #include "ErhaiGpuHwInit.h"
@@ -944,6 +954,223 @@ void gpuSubmitTest() {
     // arm-smmu's ARM_SMMU_CB_FSR_FAULT bits (MULTI, SS, UUT, ASF, TLBLKF, TLBMCF, EF, PF, AFF, TF); FORMAT (bits 9..10) is no fault.
     erhai_gpu_power_stage = v1 == 4 && v2 == 4 && !(u[16] & 0xc00001feu) && u[4] > u[3] ? 0xaa : 0xaf;
 }
+// S6a, mode 11: after a complete S5, the user-client service published for userspace (NativeAdrenoPublish: the IOService
+// "NativeAdrenoGpu" and its AGXDeviceUserClient) with the A830 facts, then sheng's wrapperRound twice through the real
+// IOUserClient path; with erhai-gpu-metal=1 also the staged AGXAccelerator for the original Metal discovery.
+extern "C" {
+IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
+                               const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t, uint32_t) __attribute__((weak));
+uint32_t native_adreno_publish_stats(uint32_t *) __attribute__((weak));
+IOService *native_adreno_published_service() __attribute__((weak));
+void native_adreno_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp") __attribute__((weak));
+IOService *native_adreno_accelerator_allocate(void) __attribute__((weak));
+unsigned native_adreno_accelerator_instance_size(void) __attribute__((weak));
+// The original IOAcceleratorES metaclass the staged class is bound to (build-native-adreno-accelerator.py, from the audited
+// 21H461 kernelcache): the live parent must be exactly it.
+extern const char kBoundAcceleratorMeta __asm__("__ZN15IOAcceleratorES10gMetaClassE") __attribute__((weak));
+kern_return_t OSKextLoadKextWithIdentifier(const char *);
+extern kmod_info_t g_kernel_kmod_info;
+}
+ErhaiGpuFacts gFacts;
+NativeAdrenoAbiDeviceInfo gDeviceInfo;
+NativeAdrenoTimer gTimer;
+// publish status, wrapper steps ok / total, first error / at, round 1 / 2 dwords, clientMemoryForType, opened / closed,
+// metal stage / status / kext
+int32_t gS6[14];
+volatile uint32_t gWCalls;
+IOReturn wcall(IOUserClient *uc, uint32_t method, const void *in, void *out) {
+    char mark[48];
+    gWCalls = gWCalls + 1;
+    snprintf(mark, sizeof mark, "P run m%u n%u", method, gWCalls);
+    setRow(4, mark);
+    IOExternalMethodArguments a{};
+    a.version = kIOExternalMethodArgumentsCurrentVersion;
+    a.selector = method;
+    const size_t is = NativeAdrenoUserClient::inputSize(method), os = NativeAdrenoUserClient::outputSize(method);
+    a.structureInput = is ? in : nullptr;
+    a.structureInputSize = uint32_t(is);
+    a.structureOutput = os ? out : nullptr;
+    a.structureOutputSize = uint32_t(os);
+    return uc->externalMethod(method, &a, nullptr, nullptr, nullptr);
+}
+// sheng's wrapperRound: the path a userspace client takes minus the Mach trap. newUserClient with the plugin's open type (type 0
+// must be refused), the
+// external-method table, Query and GetDeviceInfo (the A830 facts), two objects, BoCpuMap -> clientMemoryForType -> a kernel
+// mapping through which the IB is written and the target read, Submit, WaitFence, GetTimestamp, then clientClose (drain, unmap,
+// free). Returns the matching dwords of 4 or -1.
+int wrapperRound(IOService *svc, uint64_t ibIova, uint64_t tgtIova, int &ok, int &n, IOReturn &err, int &errAt, uint32_t &memStatus) {
+    auto step = [&](IOReturn s) {
+        const int idx = n++;
+        if (!s) ++ok;
+        else if (!err) {err = s; errAt = idx;}
+        return !s;
+    };
+    // NativeAdrenoPublish serves only the plugin's open type; any other (the IOGPU library's type 1, a plain 0) is refused cleanly.
+    constexpr UInt32 kPluginOpenType = 0x4147;
+    IOUserClient *uc = nullptr;
+    if (!step(svc->newUserClient(kernel_task, nullptr, kPluginOpenType, nullptr, &uc)) || !uc) return -1;
+    IOUserClient *foreign = nullptr;
+    step(svc->newUserClient(kernel_task, nullptr, 0, nullptr, &foreign) == kIOReturnUnsupported && !foreign ? 0 : kIOReturnError);
+    if (foreign) foreign->release();
+    NativeAdrenoAbiParams params{};
+    step(wcall(uc, NativeAdrenoMethodQuery, nullptr, &params));
+    NativeAdrenoAbiDeviceInfo info{};
+    step(wcall(uc, NativeAdrenoMethodGetDeviceInfo, nullptr, &info));
+    step(!memcmp(&info, &gDeviceInfo, sizeof info) ? 0 : kIOReturnError);
+    NativeAdrenoAbiBoAlloc alloc{4096, 12, 0};
+    NativeAdrenoAbiBoAllocReply ib{}, tgt{};
+    int matched = -1;
+    IOMemoryDescriptor *desc[2] = {};
+    IOMemoryMap *maps[2] = {};
+    if (step(wcall(uc, NativeAdrenoMethodBoAlloc, &alloc, &ib)) && step(wcall(uc, NativeAdrenoMethodBoAlloc, &alloc, &tgt))) {
+        NativeAdrenoAbiBoMap mapIb{ib.handle, ibIova, 1, 0, 2, 0}, mapTgt{tgt.handle, tgtIova, 3, 0, 2, 0};
+        NativeAdrenoAbiBoMapReply r{};
+        NativeAdrenoAbiBoCpuMap cmIb{ib.handle}, cmTgt{tgt.handle};
+        NativeAdrenoAbiBoCpuMapReply crIb{}, crTgt{};
+        if (step(wcall(uc, NativeAdrenoMethodBoMap, &mapIb, &r)) && step(wcall(uc, NativeAdrenoMethodBoMap, &mapTgt, &r)) &&
+            step(wcall(uc, NativeAdrenoMethodBoCpuMap, &cmIb, &crIb)) && step(wcall(uc, NativeAdrenoMethodBoCpuMap, &cmTgt, &crTgt))) {
+            IOOptionBits opt[2] = {};
+            const uint32_t tokens[2] = {crIb.token, crTgt.token};
+            bool mapped = true;
+            for (int i = 0; i < 2; ++i) {
+                const IOReturn st = uc->clientMemoryForType(tokens[i], &opt[i], &desc[i]);
+                if (!memStatus) memStatus = uint32_t(st);
+                if (st || !desc[i]) {mapped = false; continue;}
+                maps[i] = desc[i]->createMappingInTask(kernel_task, 0, opt[i]);
+                if (!maps[i]) {mapped = false; if (!memStatus) memStatus = 0xbad;}
+            }
+            // type 0 must be refused
+            IOMemoryDescriptor *none = nullptr;
+            IOOptionBits o = 0;
+            step(uc->clientMemoryForType(0, &o, &none) != kIOReturnSuccess && !none ? 0 : kIOReturnError);
+            step(mapped ? 0 : kIOReturnNoMemory);
+            if (mapped) {
+                volatile uint32_t *iw = reinterpret_cast<volatile uint32_t *>(maps[0]->getVirtualAddress());
+                volatile uint32_t *tw = reinterpret_cast<volatile uint32_t *>(maps[1]->getVirtualAddress());
+                for (unsigned i = 0; i < 1024; ++i) tw[i] = 0xdeadbeef;
+                const uint32_t values[3] = {0x0badc0deu, 0xfeed0001u, 0x600d0003u};
+                uint32_t words[12];
+                bool built = true;
+                for (unsigned i = 0; i < 3; ++i) {
+                    built = built && AdrenoPM4Type7(0x3d, 3, &words[i * 4]) == AdrenoPM4Success;
+                    words[i * 4 + 1] = uint32_t(tgtIova + i * 4); words[i * 4 + 2] = uint32_t(tgtIova >> 32);
+                    words[i * 4 + 3] = values[i];
+                }
+                for (unsigned i = 0; i < 12; ++i) iw[i] = words[i];
+                __asm__ volatile("dsb sy" ::: "memory");
+                NativeAdrenoAbiSubmit submit{};
+                submit.buffer_count = 1;
+                submit.buffers[0] = {ib.handle, ibIova, sizeof words};
+                NativeAdrenoAbiSubmitReply sr{};
+                if (step(built ? 0 : kIOReturnInternalError) && step(wcall(uc, NativeAdrenoMethodSubmit, &submit, &sr))) {
+                    NativeAdrenoAbiWaitFence wait{sr.fence, 200000000ull};
+                    if (step(wcall(uc, NativeAdrenoMethodWaitFence, &wait, nullptr))) {
+                        __asm__ volatile("dsb sy" ::: "memory");
+                        matched = (tw[0] == values[0]) + (tw[1] == values[1]) + (tw[2] == values[2]) + (tw[3] == 0xdeadbeef);
+                    }
+                }
+                NativeAdrenoAbiTimestamp ts{};
+                step(wcall(uc, NativeAdrenoMethodGetTimestamp, nullptr, &ts));
+            }
+        }
+    }
+    for (auto *m : maps) if (m) m->release();
+    for (auto *d : desc) if (d) d->release();
+    step(uc->clientClose());
+    uc->release();
+    return matched;
+}
+// Stages: 1 kext load attempted, 2 parent metaclass found and equal to the bound one, 3 own class registered, 4 object created
+// and initialised, 5 published. Like sheng's publishMetal; the plugin bundle itself is not on erhai yet (S6c).
+void publishMetal() {
+    int32_t *m = gS6 + 11;
+    m[0] = 1;
+    if (!native_adreno_accelerator_static_init || !native_adreno_accelerator_allocate || !native_adreno_accelerator_instance_size ||
+        !&kBoundAcceleratorMeta) {m[1] = kIOReturnUnsupported; return;}
+    m[2] = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
+    if (m[2]) {m[1] = m[2]; return;}
+    const OSSymbol *name = OSSymbol::withCString("IOAcceleratorES");
+    const OSMetaClass *parent = name ? OSMetaClass::getMetaClassWithName(name) : nullptr;
+    OSSafeReleaseNULL(name);
+    if (!parent || parent->getClassSize() != 136 || reinterpret_cast<const char *>(parent) != &kBoundAcceleratorMeta) {
+        m[1] = kIOReturnNotFound;
+        return;
+    }
+    m[0] = 2;
+    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
+    if (!handle) {m[1] = kIOReturnNoResources; return;}
+    native_adreno_accelerator_static_init();
+    m[1] = OSMetaClass::postModLoad(handle);
+    if (m[1]) return;
+    if (native_adreno_accelerator_instance_size() != 136) {m[1] = kIOReturnInvalid; return;}
+    m[0] = 3;
+    IOService *accelerator = native_adreno_accelerator_allocate();
+    if (!accelerator) {m[1] = kIOReturnNoMemory; return;}
+    if (!accelerator->init()) {accelerator->release(); m[1] = kIOReturnError; return;}
+    accelerator->setProperty("MetalPluginName", "NativeAdrenoMetal");
+    accelerator->setProperty("NativeSandboxGrantProcess", "backboardd,iconservicesagent,WidgetRenderer_Default,PosterBoard");
+    accelerator->setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
+    m[0] = 4;
+    if (!accelerator->attach(IOService::getPlatform())) {accelerator->release(); m[1] = kIOReturnNotAttached; return;}
+    accelerator->registerService();
+    m[0] = 5;
+}
+void s6Row() {
+    // P s<publish> w<steps ok>/<steps> e<first error>@<step> v<r1>/<r2 dwords of 4> m<clientMemoryForType> o<opened>/<closed>
+    // M<metal stage>.<status>
+    char row[64];
+    const int32_t *p = gS6;
+    snprintf(row, sizeof row, "P s%x w%d/%d e%x@%d v%d/%d m%x o%d/%d M%d.%x", unsigned(p[0]), p[1], p[2], unsigned(p[3]), p[4], p[5],
+             p[6], unsigned(p[7]), p[8], p[9], p[11], unsigned(p[12]));
+    setRow(4, row);
+    const ErhaiGpuFacts &f = gFacts;
+    snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0],
+             "S6 chip%x gmem%x@%llx trap%llx va%llx+%llx hbb%u sw%u mt%u ubwc%u fl%x k%d fsr%x", f.chip_id, f.gmem_bytes,
+             static_cast<unsigned long long>(f.gmem_base), static_cast<unsigned long long>(f.uche_trap_base),
+             static_cast<unsigned long long>(gDeviceInfo.va_start), static_cast<unsigned long long>(gDeviceInfo.va_size),
+             f.highest_bank_bit, f.ubwc_swizzle, f.macrotile_mode, f.ubwc_version, gDeviceInfo.flags, p[13], gpuFsr(0x58));
+}
+void gpuPublishTest() {
+    int32_t *p = gS6;
+    p[4] = p[5] = p[6] = -1;
+    erhai_gpu_power_stage = 0xb0;
+    setRow(4, "P publish running");
+    if (!native_adreno_publish || !native_adreno_published_service || !native_adreno_publish_stats) {setRow(4, "P nolink"); return;}
+    // The facts the Vulkan driver reads. The client chooses BO addresses inside 0x20000000..0x80000000: clear of the kernel buffers
+    // (below 0x303000), the GMEM window (64 MiB + 12 MiB) and the 2 GiB aperture's end.
+    ErhaiGpuDeviceFacts(&gFacts);
+    gDeviceInfo = {gFacts.chip_id, gFacts.gmem_bytes, gFacts.gmem_base, gFacts.uche_trap_base, 0x20000000ull, 0x60000000ull,
+                   gFacts.highest_bank_bit, gFacts.ubwc_swizzle, gFacts.macrotile_mode, gFacts.ubwc_version,
+                   NativeAdrenoDeviceClientIova, 0};
+    const NativeAdrenoTimeIo timerIo{nullptr, timerCpRead};
+    const IOReturn timer = gTimer.attach(&timerIo, NativeAdrenoTimeCp);
+    p[13] = timer;
+    p[0] = native_adreno_publish(NativeAdrenoGpuContextVm(), &gSubmit, &gRing, &kRingClock, timer ? nullptr : &gTimer, &gDeviceInfo,
+                                 31, gGpuContext.output_bits);
+    IOService *svc = p[0] ? nullptr : native_adreno_published_service();
+    IOReturn err = 0;
+    int ok = 0, n = 0, errAt = -1;
+    uint32_t memStatus = 0;
+    erhai_gpu_power_stage = 0xb1;
+    if (svc) {
+        p[5] = wrapperRound(svc, 0x10004000, 0x10005000, ok, n, err, errAt, memStatus);
+        erhai_gpu_power_stage = 0xb2;
+        // the slot must recycle; the addresses were unmapped by the close
+        p[6] = wrapperRound(svc, 0x10004000, 0x10005000, ok, n, err, errAt, memStatus);
+    }
+    p[1] = ok; p[2] = n; p[3] = err; p[4] = errAt; p[7] = int32_t(memStatus);
+    uint32_t closed = 0;
+    p[8] = int32_t(native_adreno_publish_stats(&closed));
+    p[9] = int32_t(closed);
+    s6Row();
+    unsigned metal = 0;
+    if (PE_parse_boot_argn("erhai-gpu-metal", &metal, sizeof metal) && metal) {
+        erhai_gpu_power_stage = 0xb3;
+        publishMetal();
+    }
+    s6Row();
+    erhai_gpu_power_stage = svc && p[5] == 4 && p[6] == 4 && !err ? 0xba : 0xbf;
+}
 void gmuPrerequisites(const egb_result &r) {
     char row[64];
     if (gContextStatus) {setRow(6, "S2 skip: GMU context not ready"); return;}
@@ -1039,6 +1266,7 @@ void gmuPrerequisites(const egb_result &r) {
     if (gMode < 9 || x[2] > 100 || (x[4] & 3)) return;
     gpuStart();
     if (gMode >= 10 && gCp[0] == 10) gpuSubmitTest();
+    if (gMode >= 11 && erhai_gpu_power_stage == 0xaa) gpuPublishTest();
 }
 // The whole report for the panic screen: every shown SMR, and each DT stream's bank registers.
 void dump(const egb_result &r) {
@@ -1115,7 +1343,7 @@ void watchdogThread(void *, wait_result_t) {
 extern "C" void erhai_gpu_power_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("erhai-gpu-power", &mode, sizeof mode) || !mode || erhai_gpu_power_stage) return;
-    gMode = mode > 10 ? 10 : mode;
+    gMode = mode > 11 ? 11 : mode;
     gBind = processor_count > 1 && processor_avail_count == processor_count;
     erhai_gpu_power_stage = 1;
     thread_t thread = nullptr;

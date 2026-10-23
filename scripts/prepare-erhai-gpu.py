@@ -104,12 +104,14 @@ VALUES = [
     ('PIPE_DDE_BV', 'PIPE_DDE_BV'),
     ('UBWC_ENC_VERSION', 'erhai_ubwc.ubwc_enc_version'), ('UBWC_HIGHEST_BANK_BIT', 'erhai_ubwc.highest_bank_bit'),
     ('UBWC_SWIZZLE', 'qcom_ubwc_swizzle(&erhai_ubwc)'), ('UBWC_AMSBC', 'qcom_ubwc_enable_amsbc(&erhai_ubwc)'),
+    ('UBWC_MACROTILE', 'qcom_ubwc_macrotile_mode(&erhai_ubwc)'),
     ('UBWC_MODE', 'qcom_ubwc_get_ubwc_mode(&erhai_ubwc)'), ('UBWC_VERSION_TAG', 'qcom_ubwc_version_tag(&erhai_ubwc)'),
     ('UBWC_SWIZZLE_LVL2', 'UBWC_SWIZZLE_ENABLE_LVL2'), ('UBWC_SWIZZLE_LVL3', 'UBWC_SWIZZLE_ENABLE_LVL3'),
     ('UBWC_3_0', 'UBWC_3_0'), ('UBWC_4_0', 'UBWC_4_0'), ('UBWC_4_3', 'UBWC_4_3'), ('UBWC_5_0', 'UBWC_5_0'), ('UBWC_6_0', 'UBWC_6_0'),
     ('UCHE_TRAP_BASE_VALUE', 'ERHAI_UCHE_TRAP_BASE'),
     ('GMEM_RANGE_MIN_VALUE', 'SZ_64M'),
     ('RB_CNTL_DEFAULT', 'MSM_GPU_RB_CNTL_DEFAULT'),
+    ('CHIP_ID', 'ERHAI_A830_CHIP_ID'), ('GMEM_BYTES', 'ERHAI_A830_GMEM'),
 ]
 LISTS = ['a830_nonctxt_regs', 'a830_protect_regs', 'a830_pwrup_reglist_regs', 'a830_ifpc_reglist_regs', 'a830_dyn_pwrup_reglist_regs']
 
@@ -185,6 +187,10 @@ def evaluator():
     ubwc_data = text_between(ubwc_c, 'static const struct qcom_ubwc_cfg_data ubwc_5_0_hbb16 = {', '};').replace(
         'ubwc_5_0_hbb16', 'erhai_ubwc')
     includes = '\n'.join(f'#include "{n}.xml.h"' for n in XMLS)
+    # The A830 catalog entry: its chip id and gmem, as the device info the user client reports.
+    entry = catalog[:catalog.index('.chip_ids = ADRENO_CHIP_IDS(0x44050001),')]
+    entry = catalog[entry.rindex('{'):catalog.index('}, {', len(entry))]
+    gmem = re.search(r'\.gmem = ([^,]+),', entry).group(1)
     bicubic = re.findall(r'REG_A8XX_TPL1_BICUBIC_WEIGHTS_TABLE\((\d+)\), (0x[0-9a-f]+|0)\);', a8xx[a8xx.index('static int hw_init('):])
     if [int(i) for i, _ in bicubic] != list(range(20)): raise SystemExit('hw_init bicubic table changed')
     bicubic = ','.join(v for _, v in bicubic)
@@ -200,6 +206,9 @@ static inline uint16_t util_float_to_half(float f) {{return (uint16_t)fui(f);}}
 #define BIT(n) (1u<<(n))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define SZ_64M 0x04000000u
+#define SZ_1M 0x00100000u
+#define ERHAI_A830_CHIP_ID 0x44050001u
+#define ERHAI_A830_GMEM ({gmem})
 #define ERHAI_UCHE_TRAP_BASE 0x1fffffffff000ull
 #define MSM_GPU_RINGBUFFER_SZ 0x8000u
 #define MSM_GPU_RINGBUFFER_BLKSIZE 32u
