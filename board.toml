@@ -207,6 +207,11 @@ text_fixups = [
   "dyld_shared_cache_arm64.13,1b05b08,44008052,24008052",
   # BTAudioHALPlugin reconnects to the missing com.apple.BTAudioHALPlugin.xpc in a tight loop with bluetoothd disabled.
   "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
+  # -[PUIProgressWindow _collectDisplayInfo] lays the boot logo out at MobileGestalt's portrait main-screen size (2400x3392) and
+  # stretches it per axis onto the landscape 3392x2400 display; load the CADisplay bounds' width and height instead
+  # (fcvt d0,s0 -> ldr d0,[x21,#0x40] / [x21,#0x48]), so the logo is centred unscaled.
+  "dyld_shared_cache_arm64.31,1fd29a8,00c0221ea01a00fd,a02240fda01a00fd",
+  "dyld_shared_cache_arm64.31,1fd2ab8,00c0221ea01e00fd,a02640fda01e00fd",
 ]
 
 [payload.adt]
