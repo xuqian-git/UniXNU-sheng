@@ -26,6 +26,9 @@
 //      without retention: the cold start (gmuColdStart): SCM gpu_init_regs, AO interrupt clear/mask, a write-combine CPU
 //      view of the five payloads, ShengGmuColdStart with the embedded gen80000_gmu.bin (hash-checked before any write) and
 //      the command-DB table, then GMU2HOST clear/mask. Rows 5-7 and wide row 1 show the SCM, HFI, load and GMU results.
+//   8  as 7, then, only after a complete cold start, S3 (gxOn): the HFI GX_BW_PERF_VOTE at `erhai-gpu-perf` (default the
+//      lowest OPP) and OOB GPU_SET, so the GMU powers GX; RBBM_STATUS and the GBIF halts are read only if GX reports on.
+//      Row 4 shows the result, wide row 0 also the gxclkctl GX GDSCR before > after. No GPU register is written.
 // Rows: diagnostic extension slots 4-7 and the two wide rows (the banner's GPU3-GPU6 and GPU7-GPU8, shown with sheng-banner=1).
 // `erhai-gpu-dump=1` additionally panics with the whole report (every valid stream-match entry), one photo of the panic screen,
 // and starts a watchdog that panics with the stage reached if the probe has not finished 70 s after it started.
@@ -43,6 +46,7 @@
 #include "ShengGmuCommandDb.h"
 #include "ShengGmu.h"
 #include <libkern/crypto/sha2.h>
+#include <string.h>
 
 extern "C" {
 // Scheduler entry points of osfmk (kern/sched_prim.h, kern/processor.h) for the CPU binding of the probe and its watchdog.
@@ -450,6 +454,56 @@ void gmuColdStart() {
     d.io.write32(d.io.cookie, ShengGmuCore, kGmuReg(0x1f993), ~(1u << 23));
     d.io.barrier(d.io.cookie);
 }
+// S3, mode 8: a6xx_gmu_set_initial_freq, then the first step of a8xx hw_init. The HFI GX_BW_PERF_VOTE (a6xx_hfi_set_freq:
+// blocking ack, perf index, bandwidth index; `erhai-gpu-perf=<n>`, default 1 = the lowest real OPP, 160 MHz on this bin, and
+// the bandwidth level its opp-peak-kBps names), then OOB GPU_SET (HOST2GMU bit 30, GMU2HOST_INFO ack bit 31, 10 ms at 100 us,
+// then cleared), which makes the GMU power GX. A8xx's GX GDSC sits in gxclkctl, which Linux leaves to the GMU (gxpd only for
+// recovery): it is read, never written. GX counts as on per a8xx_gmu_gx_is_on (GMU_PWR_CLK_STATUS bits 0 and 1 clear); only
+// then RBBM_STATUS and both GBIF halts are read. No GPU register is written.
+uint32_t gGx[10];   // vote status, fw error, ack polls (101 = none), pwr before/after, gdscr before/after, RBBM_STATUS, GBIF_HALT, RBBM_GBIF_HALT
+unsigned gPerf, gBw;
+int hfiWait(void *) {IODelay(100); return 0;}
+void gxOn() {
+    ShengGmuIo &io = gColdDevice.io;
+    auto core = [&](uint32_t dword) {uint32_t v = 0xdeadbeef; io.read32(io.cookie, ShengGmuCore, kGmuReg(dword), &v); return v;};
+    auto gpu = [&](uint32_t dword) {uint32_t v = 0xdeadbeef; io.read32(io.cookie, ShengGmuGpu, size_t(dword) * 4, &v); return v;};
+    uint32_t *g = gGx;
+    g[3] = core(0x1f7e8);
+    rd(nullptr, EGB_WIN_GXCLK, EGB_GX_GDSCR, &g[5]);
+    gPerf = 1;
+    PE_parse_boot_argn("erhai-gpu-perf", &gPerf, sizeof gPerf);
+    gPerf = ShengGmuPerfVote(gPerf, &gBw);
+    const uint32_t vote[3] = {1, gPerf, gBw};
+    uint32_t out[16], error = 0;
+    size_t count = 0;
+    erhai_gpu_power_stage = 0x81;
+    setRow(4, "EG m8 hfi perf vote");
+    g[0] = AdrenoHfiExchange(&gColdDevice.hfi, 30, vote, 3, 1000, hfiWait, out, 16, &count, &error);
+    g[1] = error;
+    g[2] = 101;
+    if (!g[0]) {
+        erhai_gpu_power_stage = 0x82;
+        setRow(4, "EG m8 oob gpu_set");
+        io.write32(io.cookie, ShengGmuCore, kGmuReg(0x1f994), 1u << 30);   // HOST2GMU_INTR_SET
+        io.barrier(io.cookie);
+        for (g[2] = 1; g[2] <= 100; ++g[2]) {
+            if (core(0x1f992) & (1u << 31)) break;                          // GMU2HOST_INTR_INFO
+            IODelay(100);
+        }
+        io.write32(io.cookie, ShengGmuCore, kGmuReg(0x1f991), 1u << 31);   // GMU2HOST_INTR_CLR
+        io.barrier(io.cookie);
+    }
+    g[4] = core(0x1f7e8);
+    rd(nullptr, EGB_WIN_GXCLK, EGB_GX_GDSCR, &g[6]);
+    erhai_gpu_power_stage = 0x83;
+    const bool gx = g[2] <= 100 && !(g[4] & 3);
+    if (gx) {
+        g[7] = gpu(0x012);    // A8XX RBBM_STATUS
+        g[8] = gpu(0x3c45);   // GBIF_HALT
+        g[9] = gpu(0x0000a);  // A8XX RBBM_GBIF_HALT
+    }
+    erhai_gpu_power_stage = gx ? 0x87 : 0x8f;
+}
 void gmuPrerequisites(const egb_result &r) {
     char row[64];
     if (gContextStatus) {setRow(6, "S2 skip: GMU context not ready"); return;}
@@ -533,6 +587,15 @@ void gmuPrerequisites(const egb_result &r) {
     snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1],
              "GMU after rst%x init%x hfi%x ver%x pwr%x rpmh%x ao%x info%x tcm%x busy%x", s.reset, s.init, s.hfi, s.version, s.pwr,
              s.rpmh, s.ao, s.info, s.tcm, s.busy);
+    if (gMode < 8 || gColdStatus != ShengGmuSuccess) return;
+    gxOn();
+    // Row 4: X v<vote status>/<fw error> o<ack polls> x<PWR_CLK_STATUS before>><after> P<perf>/<bw> R<RBBM_STATUS>
+    //   H<GBIF_HALT>/<RBBM_GBIF_HALT>; wide row 0 gets the gxclkctl GX GDSCR before > after.
+    const uint32_t *x = gGx;
+    snprintf(row, sizeof row, "X v%u/%x o%u x%x>%x P%u/%u R%x H%x/%x", x[0], x[1], x[2], x[3], x[4], gPerf, gBw, x[7], x[8], x[9]);
+    setRow(4, row);
+    const size_t used = strnlen(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0]);
+    snprintf(boot_progress_ext_wide[0] + used, sizeof boot_progress_ext_wide[0] - used, " gx%x>%x", x[5], x[6]);
 }
 // The whole report for the panic screen: every shown SMR, and each DT stream's bank registers.
 void dump(const egb_result &r) {
@@ -609,7 +672,7 @@ void watchdogThread(void *, wait_result_t) {
 extern "C" void erhai_gpu_power_probe(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("erhai-gpu-power", &mode, sizeof mode) || !mode || erhai_gpu_power_stage) return;
-    gMode = mode > 7 ? 7 : mode;
+    gMode = mode > 8 ? 8 : mode;
     gBind = processor_count > 1 && processor_avail_count == processor_count;
     erhai_gpu_power_stage = 1;
     thread_t thread = nullptr;
