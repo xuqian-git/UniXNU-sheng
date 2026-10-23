@@ -1,13 +1,21 @@
-# Board description of the Xiaomi Pad 6S Pro (sheng, SM8550), read by the unixnu build driver.
+# Board description of the OnePlus Pad 2 Pro (erhai, OPD2413, SM8750), read by the unixnu build driver.
+#
+# This is the erhai branch of a UniXNU-sheng fork: the sheng package (package/, kits/sheng in the build tree) is shared
+# unchanged, and this file, configs/erhai_defconfig, drivers/NativeUfs and the erhai scripts carry the board.
+#
+# Hardware values measured on this unit (adb, /proc/iomem, NativeUfs probes):
+#   FD base/size  0xA7000000 / 0x2A8000   (stock uefi_a ELF PT_LOAD)
+#   splash_region 0xFC800000 + 0x2B00000  (live DT /reserved-memory/splash_region)
+#   GICD / GICR   0x16000000 / 0x16080000 (stride 0x40000), timebase 19.2 MHz
+#   panel         3392x2400 video mode;   touch novatek,nf_nt36536;   UFS 0x1d84000
 
 [board]
-name = "sheng"
-soc = "SM8550"
-description = "Xiaomi Pad 6S Pro"
-kit = "sheng"                      # the package/ of this repository appears as kits/sheng in the build tree
+name = "erhai"
+soc = "SM8750"
+description = "OnePlus Pad 2 Pro"
+kit = "sheng"                      # the shared sheng package/ appears as kits/sheng in the build tree
 
-# The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image. Give --ipsw PATH to use a local file; without
-# it the remote url is read with range requests, only the members that are needed.
+# The same unchanged iPad7,1 iPadOS 17.7.11 restore image as sheng.
 [ipsw]
 url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
 product = "iPad7,1"
@@ -22,11 +30,10 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 "044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
 "044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
 
-# The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
-# first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
+# The GPT entry "userdata" of LUN 0 (sda15), read by NativeUfs on this unit.
 [userdata]
-first_lba = 0x2f3840
-last_lba = 0x3d0abfa
+first_lba = 0x3798e8
+last_lba = 0x3adb7fa
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
@@ -34,9 +41,8 @@ windows = [
 ]
 
 [kernel]
-defconfig = "sheng_defconfig"
-# Archive builders of the kernel step, in order. Each is a script of the build tree with its arguments. The VerifiedRoot
-# and VirtIO verified bundles are not built here; they need the volume policies of the target image.
+defconfig = "erhai_defconfig"
+# sheng's list without the Adreno builders (no Adreno 830 support). NativeUfs is drivers/NativeUfs of this branch.
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
@@ -53,9 +59,6 @@ archives = [
   "build-sheng-platform-power.py",
   "build-boot-progress.py",
   "build-libpthread-kernel.py",
-  "build-arm-driver.py NativeAdreno",
-  "build-native-adreno-kits.py",
-  "build-native-adreno-accelerator.py",
   "build-native-legacy-display.py",
 ]
 
@@ -99,16 +102,16 @@ roots = [
   "com.apple.iokit.IOHIDEventDriver",
 ]
 
+# The local UEFI-erhai checkout (Mu-Silicium with erhaiPkg). It is not published: it carries binaries extracted from
+# this unit's stock firmware.
 [firmware]
-config = "sheng"                   # Resources/Configs/sheng.toml in the Mu-Silicium checkout (--uefi)
-dsc = "Platforms/Xiaomi/shengPkg/sheng.dsc"
-fd = "Build/shengPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
-preflight = ["scripts/check-sheng.py"]
-submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicium-ACPI", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
-patches = ["Resources/MuPatches/Gic-Spurious.patch"]
+config = "erhai"
+dsc = "Platforms/OnePlus/erhaiPkg/erhai.dsc"
+fd = "Build/erhaiPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
 packages = [
   "{uefi}",
-  "{uefi}/Platforms/Xiaomi",
+  "{uefi}/Platforms/OnePlus",
   "{tree}/package",
   "{tree}/drivers/DarwinBoot",
   "{edk2}",
@@ -116,38 +119,41 @@ packages = [
   "{uefi}/Common/Mu_OEM_Sample",
   "{uefi}/Silicon/Qualcomm",
   "{uefi}/Silicon/Silicium",
-  "{uefi}/Silicium-ACPI",
-  "{uefi}/Silicium-ACPI/Platforms/Xiaomi",
-  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
 ]
 
 [firmware.defines]
-ENABLE_SECUREBOOT = "1"
-DEVICE_MODEL = "sheng"
+DEVICE_MODEL = "erhai"
+ENABLE_SECUREBOOT = "0"
 MEMORY_PROTECTION = "TRUE"
 SHIP_MODE = "FALSE"
-BUILDID_STRING = "sheng-research"
+BUILDID_STRING = "erhai-research"
 
-# The ramdisk of the boot image: a FAT volume with the UniXNU config, the kernel, its device tree and
-# the optional trust cache and Data seed. The loader (DarwinBoot) is part of the firmware volume.
+# The OnePlus ABL replaces the ramdisk field during "fastboot boot", so the payload rides in the kernel field after the
+# firmware volume (scripts/package-erhai-boot.py; BootShim is built with EMBEDDED_PAYLOAD_SIZE).
 [payload]
-volume = "SHENGESP"
+volume = "ERHAIESP"
 size_mib = 192
 loader = "firmware"
 title = "Boot"
-dram_size = "0x80000000"             # SMEM RAM table observed on the device
+dram_size = "0x80000000"
 skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
-panic_screen = true                  # patch panic() screen output into the payload copy of the kernel
-# The original static/System trust caches, and the owner trust bundle built around them.
+panic_screen = true
 trust_cache_sha256 = [
   "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
   "8900d6a93d7a59ce1a872a5c081e559f4240a218f97e12d44d22dda46644d68f",
 ]
+# sheng's command line, with erhai's differences:
+#   serial=0            no UART backend on this board (serial=3 panicked in pmap_map_bd during kprintf setup)
+#   kt_fixed_zones=240  120 trips the kalloc type-zone assert on this build (measured on the device)
+#   cpus=1              secondary cores are not brought up on SM8750 yet
+#   native-ufs-smmu=2   the UFS stream is behind the hypervisor: an identity stage-1 context, not a bypass bank
+# Not yet ported (sheng hardware): touch, buttons, backlight, Wi-Fi, CPU frequency, GPU and Metal, AKS, SMP.
 kernel_args = [
   "-v",
-  "serial=3",
+  "serial=0",
   "debug=0x14e",
-  "kt_fixed_zones=120",
+  "kt_fixed_zones=240",
+  "cpus=1",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
   "offline-legacy-unit-scale=2",
@@ -155,83 +161,53 @@ kernel_args = [
   "offline-legacy-validate=1",
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
-  "offline-hid-home=1",
-  "offline-hid-input=1",
   "offline-legacy-phase=4",
-  "offline-mobile-graphics-client=1",
   "offline-mobile-graphics-load=1",
   "offline-apfs-load=1",
   "boot-progress=2",
   "-apfs_shared_datavolume",
-  "offline-key-events=1",
   "native-ufs-root=1",
+  "native-ufs-smmu=2",
+  "native-ufs-diagnostics=1",
   "sheng-pmgr=2",
   "armcpu-diagnostics=1",
   "sheng-disable-watchdogd=1",
   "sheng-lite=1",
   "boot-ui-focus4=SpringBoard",
-  "sheng-smp=1",
-  "sheng-cpufreq=3",
-  "sheng-touch=4",
-  "sheng-aks=1",
-  "sheng-gpu-power=9",
-  "sheng-gpu-metal=1",
-  "sheng-fb-gpu=1",
   "sheng-banner=0",
-  "sheng-gpu-perf=8",
-  "sheng-gpu-addon=1",
   "armcpu-spi-ipi=1",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
-  "sheng-touch-hid=1",
-  "sheng-data-persist=2",
-  "sheng-staged-apps=1",
-  "sheng-buttons=1",
-  "sheng-backlight=1",
-  "sheng-wifi=1",
-  "sheng-vsync=144",
+  "sheng-fb-diff=1",
 ]
 
-# Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch); they reach it as
-# /chosen/text-fixups, not on the command line. Each is <file name>,<file offset>,<original>,<replacement>, in hex.
+# Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch). They are
+# properties of the shared 21H461 image, so they are sheng's; see UniXNU-sheng board.toml for each one's analysis.
 text_fixups = [
-  # +[AWAttentionAwarenessConfiguration initialize] (21H461) only forces +[AWClientPreferences initialize] and deadlocks
-  # SpringBoard startup against it (ABBA between the main thread and Siri's SASMyriadController); it returns at once instead.
+  # +[AWAttentionAwarenessConfiguration initialize] deadlocks SpringBoard startup against +[AWClientPreferences initialize].
   "dyld_shared_cache_arm64.15,421e8bc,28ad1bb0008544f9,c0035fd6008544f9",
-  # PosterBoardServices: PRSPosterPathURLResourceValues and PRSPosterPathFileAttributes require NSFileProtectionNone, which a Data
-  # volume without data protection never reports, so PosterBoard's data store is never viable ("Failed to migrate to Version 61
-  # from 59") and no poster, hence no wallpaper, is ever made. Both dictionaries keep only their first entry (readable / POSIX mode).
+  # PosterBoardServices requires NSFileProtectionNone, which a Data volume without data protection never reports.
   "dyld_shared_cache_arm64.13,1b05bec,44008052,24008052",
   "dyld_shared_cache_arm64.13,1b05b08,44008052,24008052",
-  # BTAudioHALPlugin's factory returns NULL, so audiomxd skips it: with bluetoothd disabled (sheng-lite) the plugin reconnects to the
-  # missing com.apple.BTAudioHALPlugin.xpc in a tight loop (about 2700 times a second, millions of log lines, one core busy).
+  # BTAudioHALPlugin reconnects to the missing com.apple.BTAudioHALPlugin.xpc in a tight loop with bluetoothd disabled.
   "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
 ]
 
-# The second boot menu entry, behind a confirmation: erase the Data seed's persistent store and start over (sheng-data-reset), with or without the Hello pages.
-[payload.install]
-title = "Install and boot"
-confirm = "ERASE all iPadOS user data and install again?"
-confirm_titles = ["Erase Data, skip Hello, boot", "Erase Data, show Hello, boot"]
-confirm_args = ["sheng-data-reset=1", "sheng-data-reset=2"]
-
 [payload.adt]
-tool = "scripts/make-sheng-adt.py"
+tool = "scripts/make-erhai-adt.py"
 chip_id = "207"
-owned_memory_size = "0x130000000"
+# 4 GiB in the high DRAM bank that erhaiPkg gives UEFI (0x8C0000000 + 5 GiB): nothing below 4 GiB is big enough.
+owned_memory_size = "0x100000000"
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
-cpu_regs = "0,0x300,0x400,0x500,0x600,0x700"   # cpu0 is the little boot core; the other two little cores (0x100, 0x200) are left off
-packed_data_ramdisk = true
-persistent_data = true               # sheng-data-persist keeps Data writes, so Data is not ephemeral storage
+cpu_regs = "0"                     # one core, matching cpus=1
+packed_data_ramdisk = true         # a volatile RAM Data volume for now (sheng: persistent Data on UFS)
 ipad_identity = true
-unique_chip_id = "required"          # the platform seed is not stored in any repository
-
-# Image parameters come from the Mu-Silicium device config; [bootimg.image] would override them.
+unique_chip_id = "required"        # the platform seed is not stored in any repository
 
 # The stock ABL powers the panel off when the device tree has no splash region, so add it.
 [[bootimg.dtb_node]]
 path = "/reserved-memory/splash_region"
 props = [
   { name = "label", type = "s", value = "cont_splash_region" },
-  { name = "reg", type = "x", value = ["0x0", "0xb8000000", "0x0", "0x2b00000"] },
+  { name = "reg", type = "x", value = ["0x0", "0xfc800000", "0x0", "0x2b00000"] },
 ]

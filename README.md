@@ -13,61 +13,62 @@
   <a href="https://x.com/unixnu"><img alt="X" src="https://img.shields.io/badge/X-@unixnu-000000?logo=x&logoColor=white"></a>
 </p>
 
-# UniXNU-sheng
+# UniXNU-erhai (OnePlus Pad 2 Pro)
 
-Device repository for the Xiaomi Pad 6S Pro (sheng, SM8550). It holds the board file, kernel defconfig, device scripts, drivers and package.
+UniXNU port to the **OnePlus Pad 2 Pro** (erhai, OPD2413, SM8750), booting the unchanged iPadOS 17.7.11 (21H461) image
+of the iPad7,1. This is the `erhai` branch of a fork of [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng): the sheng
+package is shared unchanged and the branch only adds the board. It tracks `UniXNU-sheng` main and the latest
+[UniXNU](https://github.com/UniXNU/UniXNU) main. Community project, not maintained by the UniXNU organization.
 
-🎉 **News:** The native Metal GPU driver is fully working on sheng. The render server composites the system UI through the Adreno 740, and listed processes get their own Metal devices.
+一加平板 2 Pro（erhai，SM8750）的 UniXNU 移植，运行未修改的 iPad7,1 iPadOS 17.7.11 镜像。本分支基于 UniXNU-sheng 的 fork，
+跟随 sheng 与 UniXNU 最新上游，只增加 erhai 板级部分。
 
-- [Documentation](https://unixnu.com)
-- [Device page](https://unixnu.com/devices/sheng)
-- [Porting guide](https://unixnu.com/porting/)
-- [Build](https://unixnu.com/building)
+## Progress / 进度
 
-Firmware: [uefi-sheng](https://github.com/UniXNU/uefi-sheng).
+| Stage | State | Notes |
+| --- | --- | --- |
+| UEFI (erhaiPkg) and payload handoff | ✅ | Own Mu-Silicium platform; payload embedded in the boot image kernel field (the OnePlus ABL replaces the ramdisk) |
+| XNU entry, GIC, timer | ✅ | Boot CPU only (`cpus=1`) |
+| Native UFS | ✅ | SM8750 controller: identity stage-1 SMMU context, Hibern8 exit before the first command |
+| UFS root (verified OS + SystemOS windows on userdata) | ✅ | |
+| launchd and userspace | ✅ | Needed native PAN (Oryon implements PAN) |
+| Data volume | ⚠️ | RAM-backed (ephemeral); persistent Data not yet |
+| Display | ⚠️ | CPU-rendered NativeLegacyDisplay on the GOP framebuffer (3392x2400); Apple logo shown |
+| SpringBoard / home screen | 🚧 | Next: sheng's signed-text fixups (AWAttention deadlock) on this branch |
+| Touch (Novatek NT36536) | ❌ | |
+| SMP (8 cores) | ❌ | |
+| GPU (Adreno 830) | ❌ | |
+| Wi-Fi, Bluetooth, audio, camera, USB, battery, suspend | ❌ | |
 
-Build with the `unixnu` driver of [UniXNU](https://github.com/UniXNU/UniXNU). Clone both repositories with `--recurse-submodules`; `unixnu fetch` also updates the module submodules.
+✅ working, ⚠️ partial, 🚧 in progress, ❌ not started. Last update: 2026-10-23.
+
+## Layout of this branch
+
+| File | Purpose |
+| --- | --- |
+| `board.toml` | erhai board: IPSW, userdata LBAs, archives, prelink, firmware, payload, kernel arguments, text fixups |
+| `configs/erhai_defconfig` | Kernel configuration (sheng's, without Adreno) |
+| `drivers/NativeUfs` | SM8750 override of the base NativeUfs driver |
+| `scripts/make-erhai-adt.py` | Apple device tree for erhai |
+| `scripts/package-erhai-boot.py` | Boot image with the payload embedded after the firmware volume |
 
 ## Build
 
-Run these commands from the UniXNU checkout. The device repository is `../UniXNU-sheng`.
+From the UniXNU checkout, with this repository at `../UniXNU-erhai` and the erhai UEFI at `../UEFI-erhai`
+(not published; it contains binaries extracted from the stock firmware):
 
 ```sh
-./unixnu defconfig sheng_defconfig -D ../UniXNU-sheng
+./unixnu defconfig erhai_defconfig -D ../UniXNU-erhai
 ./unixnu fetch
 ./unixnu ipsw fetch
 ./unixnu build kernel
-./unixnu build package
-./unixnu build firmware --uefi ../uefi-sheng
 ./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle> --data-ramdisk <seed>
-./unixnu bootimg --uefi ../uefi-sheng --dtb <sheng.dtb>
+python3 ../UniXNU-erhai/scripts/package-erhai-boot.py --uefi ../UEFI-erhai --dtb <erhai.dtb> \
+    --payload out/erhai/payload/payload.img -o out/erhai/boot/boot.img
+fastboot boot out/erhai/boot/boot.img
 ```
 
-The [device page](https://unixnu.com/devices/sheng#build) adds the userdata image and the Data seed growth commands. The platform seed, trust cache and Data seed are device inputs. Use `--owner-trust-cache <bundle>` for an owner-signed bundle.
-
-Without a Mac, run the kernel and userdata steps in the [macOS runner workflow](https://github.com/UniXNU/UniXNU/actions/workflows/macos.yml). The [build guide](https://unixnu.com/building#macos-runner) lists its inputs.
-
-## Device support
-
-The original iPadOS userland runs from the IPSW; the home screen and Settings are reached. This table records user-facing device support.
-
-| Feature | State | Notes |
-| --- | --- | --- |
-| Touch | ✅ | Novatek NT36532E |
-| Display | ✅ | |
-| UFS | ✅ | Native UFS root |
-| Wi-Fi | ❌ | |
-| Bluetooth | ❌ | |
-| Camera | ❌ | |
-| GPU | ✅ | Native Metal, GPU compositing, per-process devices and exported pipeline caches |
-| USB | ❌ | |
-| Audio | ❌ | |
-| Sensors | ❌ | |
-| Battery driver | ❌ | |
-| MiPPS | ❌ | |
-| Suspend and resume | ❌ | |
-
-✅ available, ⚠️ partial, ❌ not available. The GPU details are in the [Adreno 740 driver](https://unixnu.com/drivers/native-adreno) page.
+Boot with `fastboot boot` only; do not flash boot partitions. The userdata partition holds the root image.
 
 ## License
 
