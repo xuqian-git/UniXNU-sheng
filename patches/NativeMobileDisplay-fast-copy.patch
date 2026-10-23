@@ -1,0 +1,130 @@
+From 07f8ad49683aa33d3364bcf0eff80992b68f62d6 Mon Sep 17 00:00:00 2001
+From: qian <qianxu11@iflytek.com>
+Date: Fri, 23 Oct 2026 12:57:59 +0800
+Subject: [PATCH] feat(display): opt-in write-combined scanout and cached
+ source reads
+
+legacy-gop-wc=1 maps the GOP scanout write-combined; legacy-src-cached=1 reads
+the swap surface through a cacheable mapping after clean+invalidate (erhai:
+copy 170 ms -> 16 ms per frame). Adds source-cache, read-time and render-gap
+counters for diagnostics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ NativeLegacyDisplay.cpp | 51 +++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/NativeLegacyDisplay.cpp b/NativeLegacyDisplay.cpp
+index 8e6aba9..bafa88f 100644
+--- a/NativeLegacyDisplay.cpp
++++ b/NativeLegacyDisplay.cpp
+@@ -32,6 +32,13 @@ extern "C" void native_legacy_surface_rejected(uint64_t,uint64_t,uint32_t,uint32
+ extern "C" bool native_legacy_prepare_scanout(void);
+ extern "C" void native_legacy_transfer_observed(IOReturn,const void *,uint64_t);
+ extern "C" void native_legacy_copy_timing_observed(uint64_t ticks,uint64_t bytes);
++// Where a CPU-copied swap spends its time (counter ticks), for diagnostics: the source mapping's cache mode, a read-only pass over the
++// source (every 8th copy), and the gap between the end of one copy and the start of the next (the compositor's render time).
++extern "C" {
++volatile uint32_t native_legacy_src_cache,native_legacy_src_cached_mode;
++volatile uint64_t native_legacy_src_read_last,native_legacy_src_read_n,native_legacy_swap_gap_last,native_legacy_swap_gap_sum,native_legacy_swap_gap_n;
++}
++static uint64_t legacyCopyEnd;
+ extern "C" void native_legacy_retirement_observed(IOService *);
+ // GPU hand-off (boot-arg sheng-fb-gpu=1): the frame is offered to the privileged GPU client instead of being copied; the swap retires when the
+ // client reports the GPU copy done (native_legacy_gpu_complete). A refused offer or a failed copy uses the CPU copy below and is counted.
+@@ -60,6 +67,9 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
+     uint32_t scanBudget=32;
+     void *shadow=nullptr;uint64_t shadowBytes=0;bool shadowValid=false;
+     bool primary=false;
++    // legacy-gop-wc=1 maps the scanout write-combined (Normal non-cacheable) instead of Device memory, so the per-frame CPU copy
++    // can use ordinary wide stores; the dsb after the copy still publishes the frame before the swap retires.
++    bool writeCombine=false;
+     bool logicalPM=false;
+     bool transferred=false;
+     // Every request the validator accepted and the family has not retired yet. A client may submit swap N+1 while swap N is still on the GPU
+@@ -308,7 +318,11 @@ public:
+             }
+             return;
+         }
+-        IOMemoryMap *source=memory->map(kIOMapAnywhere|kIOMapReadOnly);
++        // legacy-src-cached=1 reads the surface through a cacheable mapping (cleaned and invalidated first, the writer may use another
++        // mapping) instead of the descriptor's own cache mode, which for display surfaces can be uncached and slow to read.
++        static int srcCached=-1;
++        if(srcCached<0){unsigned v=0;PE_parse_boot_argn("legacy-src-cached",&v,sizeof v);srcCached=v==1;native_legacy_src_cached_mode=srcCached;}
++        IOMemoryMap *source=memory->map(kIOMapAnywhere|kIOMapReadOnly|(srcCached?kIOMapCopybackCache:0));
+         if(!source || !source->getVirtualAddress() || source->getLength()<allocation) {
+             OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNoMemory,request,0);return;
+         }
+@@ -330,6 +344,27 @@ public:
+         if(!native_legacy_prepare_scanout()) {
+             OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
+         }
++        uint64_t arrival;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(arrival));
++        if(legacyCopyEnd && arrival>legacyCopyEnd) {
++            native_legacy_swap_gap_last=arrival-legacyCopyEnd;native_legacy_swap_gap_sum=native_legacy_swap_gap_sum+(arrival-legacyCopyEnd);
++            native_legacy_swap_gap_n=native_legacy_swap_gap_n+1;
++        }
++        native_legacy_src_cache=(uint32_t)(source->getMapOptions()&kIOMapCacheMask);
++        if(srcCached) {
++            const uintptr_t base=(uintptr_t)source->getVirtualAddress();
++            for(uintptr_t line=base&~(uintptr_t)63;line<base+source->getLength();line+=64)__asm__ volatile("dc civac, %0"::"r"(line):"memory");
++            __asm__ volatile("dsb sy" ::: "memory");
++        }
++        const uint64_t readN=native_legacy_src_read_n;native_legacy_src_read_n=readN+1;
++        if(!(readN&7)) {
++            uint64_t r0,r1,sum=0;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(r0));
++            for(uint32_t row=0;row<height;++row) {
++                const uint64_t *in=reinterpret_cast<const uint64_t *>(source->getVirtualAddress()+row*sourceStride);
++                for(uint32_t w=0;w<width/2;++w)sum+=*reinterpret_cast<const volatile uint64_t *>(in+w);
++            }
++            __asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(r1));
++            native_legacy_src_read_last=(r1-r0)|(sum&0);
++        }
+         uint64_t copyStart;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyStart));
+         uint64_t stored=UINT64_MAX;
+         {
+@@ -347,6 +382,13 @@ public:
+                     source->getLength(),sourceStride,width,height,shadow,shadowValid);
+             if(stored!=UINT64_MAX)shadowValid=true;
+         }
++        if(stored==UINT64_MAX && writeCombine) {
++            shadowValid=false;
++            const uint8_t *in=reinterpret_cast<const uint8_t *>(source->getVirtualAddress());
++            uint8_t *out=reinterpret_cast<uint8_t *>(bootMapping->getVirtualAddress());
++            for(uint32_t row=0;row<height;++row)memcpy(out+(uint64_t)row*video.v_rowBytes,in+(uint64_t)row*sourceStride,(size_t)width*4);
++            stored=length;
++        }
+         if(stored==UINT64_MAX) {
+             shadowValid=false;
+             if(!native_legacy_copy_pixels(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
+@@ -357,7 +399,7 @@ public:
+             stored=length;
+         }
+         __asm__ volatile("dsb sy" ::: "memory");
+-        {uint64_t copyEnd;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyEnd));native_legacy_copy_timing_observed(copyEnd-copyStart,stored);}
++        {uint64_t copyEnd;__asm__ volatile("isb\n\tmrs %0, cntpct_el0":"=r"(copyEnd));native_legacy_copy_timing_observed(copyEnd-copyStart,stored);legacyCopyEnd=copyEnd;}
+         OSSafeReleaseNULL(source);transferred=true;
+         native_legacy_transfer_observed(kIOReturnSuccess,request,length);
+         finishTransfer(request);
+@@ -495,7 +537,8 @@ public:
+            !video.v_width || !video.v_height || video.v_depth!=32 || video.v_rotate ||
+            video.v_width>16384 || video.v_height>16384 || video.v_rowBytes<video.v_width*4 ||
+            video.v_rowBytes>UINT64_MAX/video.v_height)return false;
+-        IOMemoryMap *mapping=provider->mapDeviceMemoryWithIndex(0,kIOMapInhibitCache);
++        unsigned wc=0;PE_parse_boot_argn("legacy-gop-wc",&wc,sizeof(wc));
++        IOMemoryMap *mapping=provider->mapDeviceMemoryWithIndex(0,wc==1?kIOMapWriteCombineCache:kIOMapInhibitCache);
+         if(!mapping)return false;
+         bool valid=mapping->getVirtualAddress() && mapping->getPhysicalAddress()==video.v_baseAddr &&
+                    mapping->getLength()==video.v_rowBytes*video.v_height;
+@@ -504,7 +547,7 @@ public:
+             uint32_t width=0,height=0;getDisplayDimensions(&width,&height);
+             valid=width==video.v_width && height==video.v_height;
+             if(valid) {
+-                OSSafeReleaseNULL(bootMapping);bootMapping=mapping;mapping=nullptr;primary=video.v_display==1;
++                OSSafeReleaseNULL(bootMapping);bootMapping=mapping;mapping=nullptr;primary=video.v_display==1;writeCombine=wc==1;
+                 valid=native_legacy_gop_mapping_observed(this,bootMapping,width,height);
+             }
+         }
+-- 
+2.54.0 (Apple Git-157)
+
