@@ -989,6 +989,13 @@ static void crash_banner(unsigned now) {
       (unsigned long long)(native_legacy_copy_bytes_last>>10),(unsigned long long)((native_legacy_copy_bytes_sum/c)>>10));
     banner_copy_n=c;
   }
+  // Data persistence (NativeRamBlock, state as ext_data_rows): whether the store resumed, and what was written through since boot.
+  if(&native_data_persist_state && native_data_persist_state)
+    snprintf(rows[n++],120,"DATA  st=%u hdr=%u lba=%llx pages=%llu present=%llu loaded=%llu writes=%llu syncs=%llu errors=%llu",
+      native_data_persist_state,native_data_persist_header,(unsigned long long)native_data_persist_first_lba,
+      (unsigned long long)native_data_persist_pages,(unsigned long long)native_data_persist_present,
+      (unsigned long long)native_data_persist_loaded,(unsigned long long)native_data_persist_writes,
+      (unsigned long long)native_data_persist_syncs,(unsigned long long)native_data_persist_errors);
   // The display path's counters (the GPU hand-off hides the CPU copy row): swaps the driver validated and how many it took, and the GPU
   // client's offers, completions, failures, abandoned frames, CPU fallbacks and the last fallback status.
   if(&native_legacy_swap_validation_calls && native_legacy_swap_validation_calls) {

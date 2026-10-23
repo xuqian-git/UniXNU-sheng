@@ -154,7 +154,10 @@ trust_cache_sha256 = [
 #   native-ufs-smmu=2   the UFS stream is behind the hypervisor: an identity stage-1 context, not a bypass bank
 #   sheng-vsync=60      the software vsync of NativeLegacyDisplay; 60 rather than the panel's 144 while frames are CPU copies
 # sheng's software-only switches are kept: the owned AppleKeyStore (sheng-aks), key events, HID input and Home.
-# Not yet ported (sheng hardware): touch, buttons, backlight, Wi-Fi, CPU frequency, GPU and Metal, persistent Data.
+#   sheng-data-persist=2  Data writes go through to a store window at the end of userdata (below the 1024 MiB log reserve);
+#                       the seed is grown to fill it: seed-data-grow.py --auto --userdata-bytes 237866397696 (210 GiB)
+#   sheng-banner=0      no diagnostic painting once the system owns the display
+# Not yet ported (sheng hardware): touch, buttons, backlight, Wi-Fi, CPU frequency, GPU and Metal.
 kernel_args = [
   "-v",
   "serial=0",
@@ -186,7 +189,7 @@ kernel_args = [
   "sheng-lite=1",
   "boot-ui-focus4=SpringBoard",
   "sheng-aks=1",
-  "sheng-banner=1", "boot-exit-watch=backboardd", "boot-ui-focus3=backboardd",
+  "sheng-banner=0", "sheng-data-persist=2", "boot-exit-watch=backboardd", "boot-ui-focus3=backboardd",
   "armcpu-spi-ipi=1",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
@@ -216,7 +219,8 @@ root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 # (Aff2=1; XNU's CPU phys id must keep Aff2: UniXNU patches/xnu/native-smp-wide-affinity.patch). The prime cores come
 # right after the boot core so that they are cpu1 and cpu2, the first cores the scheduler picks (see kernel_args).
 cpu_regs = "0,0x10000,0x10100,0x100,0x200,0x300,0x400,0x500"
-packed_data_ramdisk = true         # a volatile RAM Data volume for now (sheng: persistent Data on UFS)
+packed_data_ramdisk = true
+persistent_data = true             # sheng-data-persist keeps Data writes on UFS, so Data is not ephemeral storage
 ipad_identity = true
 unique_chip_id = "required"        # the platform seed is not stored in any repository
 
