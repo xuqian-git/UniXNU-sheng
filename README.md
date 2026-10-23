@@ -61,6 +61,7 @@ From the UniXNU checkout, with this repository at `../UniXNU-erhai` and the erha
 ./unixnu defconfig erhai_defconfig -D ../UniXNU-erhai
 ./unixnu fetch
 ./unixnu ipsw fetch
+ln -sfn "$PWD/../UEFI-erhai" out/erhai/tree/uefi-sheng   # sheng's BootProgress takes Font.h from the UEFI checkout
 ./unixnu build kernel
 ./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle> --data-ramdisk <seed>
 python3 ../UniXNU-erhai/scripts/package-erhai-boot.py --uefi ../UEFI-erhai --dtb <erhai.dtb> \

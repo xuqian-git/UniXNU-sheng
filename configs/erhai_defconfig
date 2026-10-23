@@ -29,7 +29,8 @@ CONFIG_XNU_NATIVE_ARCH_TIMER=y
 # Oryon implements PAN; without it every exception into EL1 sets PSTATE.PAN and copyin faults loop.
 CONFIG_XNU_NATIVE_PAN=y
 CONFIG_XNU_BOOT_PROGRESS=y
-# CPU-rendered NativeLegacyDisplay on the UEFI GOP framebuffer; no Adreno 830 support yet.
+# CPU-rendered NativeLegacyDisplay on the UEFI GOP framebuffer; no Adreno 830 support yet. The sheng display bundle's
+# references to the Adreno 740 driver resolve to scripts/build-erhai-adreno-stubs.py's zero stand-ins.
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 CONFIG_XNU_NATIVE_ADRENO=n
 
@@ -38,6 +39,6 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="5A6AECE7-BEA6-425E-A5EF-6D26CF1B81D4"
 CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
-CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+CONFIG_XNU_EXTRA_LD_ARCHIVES="{tree}/build/erhai-adreno-stubs/libErhaiAdrenoStubs.a"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n

@@ -43,6 +43,7 @@ windows = [
 [kernel]
 defconfig = "erhai_defconfig"
 # sheng's list without the Adreno builders (no Adreno 830 support). NativeUfs is drivers/NativeUfs of this branch.
+# build-erhai-adreno-stubs.py defines the Adreno symbols the sheng display bundle references (erhai_defconfig links it).
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
@@ -60,6 +61,7 @@ archives = [
   "build-boot-progress.py",
   "build-libpthread-kernel.py",
   "build-native-legacy-display.py",
+  "build-erhai-adreno-stubs.py",
 ]
 
 [kernel.prelink]

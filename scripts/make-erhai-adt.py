@@ -17,7 +17,7 @@ purpose: the target image is the same unchanged iPad7,1 / 21H461 restore, so the
 platform expert has to believe it is an iPad Pro (12.9-inch) 2nd generation.
 
 Contents of the tree follow UniXNU docs/porting/device-tree.md:
-  /chosen            random-seed, NVRAM CHRP proxy, dram placeholders,
+  /chosen            random-seed, NVRAM CHRP proxy, dram base and size,
                      darwinboot-memory-size, crypto-hash-method, identity
   /chosen/memory-map RAMDisk / PackedRAMDisk / TrustCache placeholders
   /cpus              cpuN with state/reg/device_type/timebase-frequency
@@ -144,9 +144,9 @@ def make_tree(memory_size, random_seed, *, dram_size=0x10000000,
         chosen += [('ephemeral-storage', struct.pack('<I', 1))]
     if memory_size:
         chosen += [('darwinboot-memory-size', struct.pack('<Q', memory_size))]
-    # Zero placeholders: DarwinBoot writes the address/size it actually owns, so
-    # XNU only ever sees RAM this boot controls.
-    chosen += [('dram-base', bytes(8)), ('dram-size', bytes(8))]
+    # Fixed values as sheng: the upstream DarwinBoot passes the owned window in the boot arguments and does
+    # not rewrite these (the old erhai DarwinBoot filled zero placeholders).
+    chosen += [('dram-base', struct.pack('<Q', DRAM_BASE)), ('dram-size', struct.pack('<Q', dram_size))]
     chosen += [('crypto-hash-method', b'sha2-384\0')]
     if root_match_volume_uuid:
         chosen += [('root-matching', ('<dict><key>IOProviderClass</key><string>IOMedia</string>'
