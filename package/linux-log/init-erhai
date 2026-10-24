@@ -1,0 +1,114 @@
+#!/bin/busybox sh
+# erhai log reader (see scripts/build-erhai-log-reader.py): the stock GKI kernel with the tablet's own vendor_boot, whose ramdisk is
+# loaded in front of this one and brings /lib/modules. After the vendor modules (UFS, PMIC, reboot reason, USB) the UniXNU diagnostic
+# log window (the last 8192 blocks of userdata, written by package/BootLog.c) and the export region below it are copied into files on a
+# FAT image in RAM, which a USB mass-storage gadget offers read-only; scripts/read-erhai-log.py copies them off the mounted volume and
+# ejects it, and the eject returns the tablet to fastboot. The same gadget carries a CDC ACM shell for debugging the reader by hand
+# (screen /dev/cu.usbmodemerhailog*; touch /run/hold there keeps the reader up after the eject). The volume rather than the shell is how
+# logs travel: sheng's shell protocol moves 64 KiB base64 pieces, and the diagnostic export runs to 100+ MiB. userdata is only read;
+# nothing on UFS is mounted.
+/bin/busybox --install -s /bin
+mkdir -p /proc /sys /dev /run /tmp
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+# This kernel has no devtmpfs (CONFIG_DEVTMPFS is not set): the few nodes the reader needs are made by hand.
+mknod /dev/null c 1 3; mknod /dev/zero c 1 5; mknod /dev/kmsg c 1 11
+mount -t configfs configfs /sys/kernel/config
+mount -t tmpfs tmpfs /run
+L=/run/reader.log
+say() { echo "$*" >> $L; echo "<2>reader: $*" > /dev/kmsg 2>/dev/null; }   # kmsg: the screen (splashcon) and pstore
+echo on > /proc/sys/kernel/printk_devkmsg
+echo 8 > /proc/sys/kernel/printk
+arg() { sed -n "s/.*reader\.$1=\([0-9]*\).*/\1/p" /proc/cmdline; }
+# reader.splash=1: splashcon (scripts/build-erhai-splashcon.sh, packed by build-erhai-log-reader.py --splashcon) draws the message log
+# on the boot logo's framebuffer. Only for bring-up of the early steps: the screen stops taking lines when the vendor modules are in.
+[ "$(arg splash)" = 1 ] && [ -e /lib/reader/splashcon.ko ] && insmod /lib/reader/splashcon.ko
+say "erhai log reader $(uname -r)"
+
+to_fastboot() { /bin/rebootbl; }   # package/linux-log/rebootbl-erhai: the reboot-reason cell, then a restart
+
+# The vendor modules /etc/reader.load names (the build script's choice, in recovery order); a module that fails (already built in,
+# absent hardware) is only counted.
+M=/lib/modules
+loaded=0; failed=0
+for m in $(cat /etc/reader.load); do
+    if insmod $M/$m 2>>/run/insmod.log; then loaded=$((loaded + 1)); else failed=$((failed + 1)); echo "  $m" >> /run/insmod.log; fi
+    [ $(((loaded + failed) % 50)) = 0 ] && say "modules: $((loaded + failed)) tried, at $m"
+done
+say "modules: $loaded loaded, $failed failed: $(grep '^  ' /run/insmod.log | tr -d ' ' | tr '\n' ' ')"
+# The vendor modules are loud (the oplus charger logs a gauge timeout every 100 ms); from here the screen shows the reader's lines
+# (level 2) and worse.
+echo 3 > /proc/sys/kernel/printk
+# reader.probe=1 returns to fastboot right here: a check the host sees without the screen.
+[ "$(arg probe)" = 1 ] && to_fastboot
+
+# userdata: the partition whose uevent names it; the log window is its last 8192 blocks of 4096 bytes, the export region (NativeUfs
+# kExportBlocks) the 65536 below them.
+P=
+for i in $(seq 1 30); do
+    for u in /sys/class/block/*/uevent; do grep -q '^PARTNAME=userdata$' "$u" && P=$(basename $(dirname "$u")) && break; done
+    [ -n "$P" ] && break; sleep 1
+done
+D=/run/disk
+mkdir -p $D
+truncate -s 320M /run/disk.img && mkdosfs -F 32 -n ERHAILOG /run/disk.img >/dev/null && mount -t vfat -o loop /run/disk.img $D ||
+    say "disk: no FAT image"
+if [ -n "$P" ]; then
+    B=$(($(cat /sys/class/block/$P/size) / 8))
+    # No devtmpfs: the partition's node comes from its sysfs major:minor.
+    mknod /run/userdata b $(cut -d: -f1 /sys/class/block/$P/dev) $(cut -d: -f2 /sys/class/block/$P/dev)
+    say "userdata=$P ($(cat /sys/class/block/$P/dev)) blocks=$B"
+    dd if=/run/userdata of=$D/window.bin bs=4096 skip=$((B - 8192)) count=8192 2>>$L
+    dd if=/run/userdata of=$D/below.bin bs=4096 skip=$((B - 8192 - 65536)) count=65536 2>>$L
+    say "window magic $(dd if=$D/window.bin bs=8 count=1 2>/dev/null)"
+else
+    say "userdata not found"
+fi
+dmesg > $D/dmesg.txt
+# The previous boot's console and pmsg (qcom_dynamic_ramoops), e.g. how the last reader or a crashed run ended.
+mkdir -p /sys/fs/pstore $D/pstore && mount -t pstore pstore /sys/fs/pstore 2>/dev/null && cp /sys/fs/pstore/* $D/pstore/ 2>/dev/null
+cp /run/insmod.log $D/insmod.txt
+cp $L $D/reader.txt
+sync; umount $D
+
+# The controller probes late (its suppliers come from the modules above); the role is forced to device on every try, through the role
+# switch and dwc3-msm's own mode attribute. Without a UDC after 180 s the reader restarts into fastboot, so a USB failure still ends
+# in fastboot instead of a tablet that waits for keys.
+G=/sys/kernel/config/usb_gadget/log
+F=$G/functions/mass_storage.0
+A=$G/functions/acm.usb0
+gadget() {
+    mkdir -p $G/strings/0x409 $G/configs/c.1 $F $A || return 1
+    echo 0x1d6b > $G/idVendor; echo 0x0104 > $G/idProduct
+    echo erhailog > $G/strings/0x409/serialnumber; echo erhai-log-reader > $G/strings/0x409/product
+    echo 1 > $F/lun.0/removable; echo 1 > $F/lun.0/ro; echo /run/disk.img > $F/lun.0/file
+    ln -s $F $G/configs/c.1/
+    ln -s $A $G/configs/c.1/
+    # No devtmpfs: the ACM tty's node comes from its sysfs major:minor (the major is dynamic).
+    T=/dev/ttyGS0
+    [ -e /sys/class/tty/ttyGS0/dev ] && mknod $T c $(cut -d: -f1 /sys/class/tty/ttyGS0/dev) $(cut -d: -f2 /sys/class/tty/ttyGS0/dev)
+    ( while [ -e $T ]; do setsid sh -c "exec sh -i <$T >$T 2>&1"; sleep 1; done ) &
+    for i in $(seq 1 90); do
+        for r in /sys/class/usb_role/*/role; do [ -e "$r" ] && echo device > "$r"; done
+        for m in /sys/bus/platform/devices/*.ssusb/mode; do [ -e "$m" ] && echo peripheral > "$m"; done
+        U=$(ls /sys/class/udc 2>/dev/null | head -n1); [ -n "$U" ] && break; sleep 2
+    done
+    [ -n "$U" ] || { say "usb: no udc"; return 1; }
+    say "usb: mass storage on $U after $((i * 2)) s"
+    ( echo "$U" > $G/UDC ) &
+}
+usb_report() {
+    mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+    say "udc: $(ls /sys/class/udc 2>&1 | tr '\n' ' ')"
+    say "usb_role: $(for r in /sys/class/usb_role/*; do echo "$r=$(cat $r/role 2>&1)"; done | tr '\n' ' ')"
+    say "deferred: $(cut -c1-60 /sys/kernel/debug/devices_deferred 2>&1 | grep -i 'usb\|dwc\|phy\|eud\|glink\|ucsi' | tr '\n' ';')"
+}
+gadget || { usb_report; to_fastboot; }
+
+# The host's eject (START STOP UNIT) closes the LUN; then, or after 15 minutes without a host, back to fastboot, unless /run/hold.
+for i in $(seq 1 900); do
+    [ -z "$(cat $F/lun.0/file 2>/dev/null)" ] && say "ejected" && break
+    sleep 1
+done
+while [ -e /run/hold ]; do sleep 5; done
+to_fastboot

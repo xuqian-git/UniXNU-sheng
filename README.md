@@ -41,8 +41,9 @@ package is shared unchanged and the branch only adds the board. It tracks `UniXN
 | CPU DVFS and thermal | ✅ | `ErhaiCpuFreq`: SCMI performance protocol through the CPUCP mailbox; load governor and TSENS limit with stock ColorOS targets (80% load, hispeed, floors, 2918/3072 MHz sustained cap, 75 C) |
 | GPU (Adreno 830) | ❌ | |
 | Wi-Fi, Bluetooth, audio, camera, USB, battery, suspend | ❌ | |
+| Unattended test runs | ✅ | XNU restarts into fastboot by itself (`sheng-autoreset`, PMIC reboot-reason cell); a Linux log reader on init_boot_b hands the UFS log window, the diagnostic export and a screenshot to the host as a USB volume (2026-10-24) |
 
-✅ working, ⚠️ partial, 🚧 in progress, ❌ not started. Last update: 2026-10-23.
+✅ working, ⚠️ partial, 🚧 in progress, ❌ not started. Last update: 2026-10-24.
 
 ## Layout of this branch
 
@@ -53,6 +54,10 @@ package is shared unchanged and the branch only adds the board. It tracks `UniXN
 | `drivers/NativeUfs` | SM8750 override of the base NativeUfs driver |
 | `scripts/make-erhai-adt.py` | Apple device tree for erhai |
 | `scripts/package-erhai-boot.py` | Boot image with the payload embedded after the firmware volume |
+| `package/linux-log/init-erhai`, `rebootbl-erhai` | Log reader: the stock GKI kernel and vendor modules, USB mass storage (logs) plus an ACM shell (debugging) |
+| `package/linux-log/splashcon` | Kernel console on the boot logo's framebuffer, for bring-up of the reader's early steps |
+| `scripts/build-erhai-log-reader.py`, `build-erhai-splashcon.sh` | Build the reader image and its init_boot ramdisk, and splashcon for the stock kernel |
+| `scripts/run-erhai-unattended.sh`, `read-erhai-log.py` | One test run end to end; fetch and decode the log off the reader's volume |
 
 ## Build
 
@@ -74,6 +79,27 @@ fastboot boot out/erhai/boot/boot.img
 ```
 
 Boot with `fastboot boot` only; do not flash boot partitions. The userdata partition holds the root image.
+
+## Unattended test runs / 无人值守测试
+
+`board.toml` turns on the UFS diagnostic log (`sheng-log=1`). A test image built with
+`--kernel-arg sheng-autoreset=120 --kernel-arg sheng-diag-export=110` restarts into fastboot by itself after 120 s, or after a
+panic through the hypervisor watchdog. The log reader runs the tablet's own stock kernel and vendor modules. ABL takes the generic
+ramdisk from init_boot_b, so the reader's ramdisk is flashed there (`init_boot_b` is the only partition it changes; keep a backup).
+The reader copies the log window and the export region below it into a FAT volume, `ERHAILOG`, which it offers read-only over USB.
+
+```sh
+# the reader, once per stock firmware (busybox: a static aarch64 build, e.g. Debian's busybox-static)
+python3 scripts/build-erhai-log-reader.py --boot boot_b.img --vendor-boot vendor_boot_b.img --busybox busybox \
+    --out ~/.cache/erhai-log-reader/erhai-log-reader.img --init-boot ~/.cache/erhai-log-reader/erhai-log-reader-init_boot.img
+# one run: boot, wait for fastboot, read the log into build/erhai-logs/<tag>-<boot id>/, back in fastboot
+PY=python3.12 scripts/run-erhai-unattended.sh out/erhai/boot/boot.img
+```
+
+`read-erhai-log.py` writes `msgbuf.txt`, `slots.txt`, `latest.txt`, `export/` and `diag/`, with `diag/files/screen.bgrx` as a
+half-resolution screenshot, plus the reader's own `reader/` files. The eject at the end sends the tablet back to fastboot. While the
+reader runs, `/dev/cu.usbmodemerhailog*` is a shell on it, and `touch /run/hold` there keeps it up after the eject. The stock kernel
+has no devtmpfs, so the reader makes its device nodes by hand.
 
 ## License
 

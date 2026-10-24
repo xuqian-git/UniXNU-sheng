@@ -1,0 +1,12 @@
+#!/bin/busybox sh
+# erhai's /bin/rebootbl (the command scripts/read-sheng-log.py sends last): restart into fastboot through the reboot-reason cell (PMIC
+# SDAM 0x7100, byte 0x48, bits 7:1; bootloader = 2, the value package/BootReset.c writes from XNU) on the SDAM nvmem device, then a
+# plain restart. After the vendor qcom-reboot-reason driver's "bootloader" the tablet seemed to come back to the reader instead.
+for n in /sys/bus/nvmem/devices/*; do
+    readlink -f $n/of_node 2>/dev/null | grep -q '/sdam@7100$' || continue
+    b=$(dd if=$n/nvmem bs=1 skip=72 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+    printf "\\$(printf %o $(( (${b:-0} & 1) | 4 )))" | dd of=$n/nvmem bs=1 seek=72 count=1 conv=notrunc 2>/dev/null
+    echo "<2>reader: reboot reason cell $n: ${b:-?} -> $(dd if=$n/nvmem bs=1 skip=72 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')" > /dev/kmsg
+done
+sync
+reboot -f
