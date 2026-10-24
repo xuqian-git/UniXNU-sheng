@@ -86,6 +86,9 @@ extern "C" {
 processor_t thread_bind(processor_t);
 processor_t cpu_to_processor(int);
 wait_result_t thread_block(thread_continue_t);
+wait_result_t assert_wait_timeout(event_t, wait_interrupt_t, uint32_t, uint32_t);
+kern_return_t thread_wakeup_prim(event_t, boolean_t, wait_result_t);
+boolean_t ml_at_interrupt_context(void);
 int cpu_number(void);
 extern uint32_t processor_avail_count;
 extern unsigned int processor_count;
@@ -620,7 +623,19 @@ int ringPublish(void *, const volatile uint32_t *, size_t) {__asm__ volatile("ds
 int ringAcquire(void *, volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 const NativeAdrenoRingCache kRingCache = {nullptr, ringPublish, ringAcquire};
 uint64_t ringNow(void *) {uint64_t us = 0; coldNow(nullptr, &us); return us;}
-int ringIdle(void *) {IODelay(50); return 0;}
+// S6f(a): a fence wait sleeps until the GPU's fence interrupt (gpuIrq wakes gFenceEvent) once S5 has proved that interrupt, instead of
+// spinning 50 us at a time on the CPU (the render server's waits kept a core at 100%). The 500 us timeout covers a fence that lands between
+// the ring's check and the sleep. Before that, and in interrupt context, the 50 us spin stays.
+volatile bool gFenceIrq;
+int gFenceEvent;
+volatile uint32_t gFenceSleeps;
+int ringIdle(void *) {
+    if (!gFenceIrq || ml_at_interrupt_context()) {IODelay(50); return 0;}
+    gFenceSleeps = gFenceSleeps + 1;
+    assert_wait_timeout(reinterpret_cast<event_t>(&gFenceEvent), THREAD_UNINT, 500, NSEC_PER_USEC);
+    thread_block(THREAD_CONTINUE_NULL);
+    return 0;
+}
 const NativeAdrenoRingClock kRingClock = {nullptr, ringNow, ringIdle};
 // The zap load's platform: the PIL SMCs with qcom_scm's result convention, and cache publication of the metadata (cacheable
 // NativeAdreno memory, cleaned to PoC as dma_alloc_coherent memory would need none) or of the write-combined region.
@@ -690,11 +705,11 @@ void gpuStart() {
     }
     erhai_gpu_power_stage = 0x90;
     // S6d: with the Metal device (erhai-gpu-metal=1) the bring-up first takes the BO pool, as sheng's NativeAdrenoService does:
-    // erhai-gpu-pool MiB (default 1536), halved until one contiguous block is had. Without it every BO is scattered pages whose
+    // erhai-gpu-pool MiB (default 3072 of the 7 GiB window, S6f), halved until one contiguous block is had. Without it every BO is scattered pages whose
     // attribute XNU keeps resetting (sheng int-160). The heartbeat row shows the size taken.
     unsigned metal = 0;
     if (PE_parse_boot_argn("erhai-gpu-metal", &metal, sizeof metal) && metal) {
-        unsigned pool = 1536;
+        unsigned pool = 3072;
         PE_parse_boot_argn("erhai-gpu-pool", &pool, sizeof pool);
         native_adreno_pool_mib = pool;
     }
@@ -815,6 +830,7 @@ void gpuIrq(void *) {
     gIrqSeen = gIrqSeen | r.status;
     gIrqCount = gIrqCount + 1;
     if (r.flags & NativeAdrenoIrqFatal) gIrqFatal = gIrqFatal + 1;
+    if (r.flags & NativeAdrenoIrqFence) thread_wakeup_prim(reinterpret_cast<event_t>(&gFenceEvent), false, THREAD_AWAKENED);
     gIrqEmpty = r.status ? 0 : gIrqEmpty + 1;
     if (gIrqEmpty > 100000) hwWrite(nullptr, kIntMask, 0);
 }
@@ -1223,14 +1239,16 @@ void coherenceProbe(NativeAdrenoVm *vm) {
 }
 void gpuPublishTest() {
     int32_t *p = gS6;
+    gFenceIrq = true;   // S5 (stage 0xaa) proved one fence interrupt per fence
     p[4] = p[5] = p[6] = -1;
     erhai_gpu_power_stage = 0xb0;
     setRow(4, "P publish running");
     if (!native_adreno_publish || !native_adreno_published_service || !native_adreno_publish_stats) {setRow(4, "P nolink"); return;}
-    // The facts the Vulkan driver reads. The client chooses BO addresses inside 0x20000000..0x80000000: clear of the kernel buffers
-    // (below 0x303000), the GMEM window (64 MiB + 12 MiB) and the 2 GiB aperture's end.
+    // The facts the Vulkan driver reads. The client chooses BO addresses inside 0x20000000..0x100000000: clear of the kernel buffers
+    // (below 0x303000), the GMEM window (64 MiB + 12 MiB) and the coherence probe (0x18000000); S6f(c) grew the aperture to the whole
+    // 32-bit input range (4 GiB, NativeAdrenoGpuContext GEN8).
     ErhaiGpuDeviceFacts(&gFacts);
-    gDeviceInfo = {gFacts.chip_id, gFacts.gmem_bytes, gFacts.gmem_base, gFacts.uche_trap_base, 0x20000000ull, 0x60000000ull,
+    gDeviceInfo = {gFacts.chip_id, gFacts.gmem_bytes, gFacts.gmem_base, gFacts.uche_trap_base, 0x20000000ull, 0xE0000000ull,
                    gFacts.highest_bank_bit, gFacts.ubwc_swizzle, gFacts.macrotile_mode, gFacts.ubwc_version,
                    NativeAdrenoDeviceClientIova, 0};
     coherenceProbe(NativeAdrenoGpuContextVm());
@@ -1238,7 +1256,7 @@ void gpuPublishTest() {
     const IOReturn timer = gTimer.attach(&timerIo, NativeAdrenoTimeCp);
     p[13] = timer;
     p[0] = native_adreno_publish(NativeAdrenoGpuContextVm(), &gSubmit, &gRing, &kRingClock, timer ? nullptr : &gTimer, &gDeviceInfo,
-                                 31, gGpuContext.output_bits);
+                                 32, gGpuContext.output_bits);
     IOService *svc = p[0] ? nullptr : native_adreno_published_service();
     IOReturn err = 0;
     int ok = 0, n = 0, errAt = -1;
@@ -1292,6 +1310,7 @@ uint64_t perfCounter(uint32_t lo) {
 // The plugin's status line (native_bridge_metal_status: counters, then the last two refusals' texts) arrives as 57-character pieces
 // "ST<n> ..." on report2, one every ten seconds; the heartbeat keeps each piece and shows them joined over the wide rows.
 char gStatus[8][58];
+volatile uint32_t gDcvsBusy, gDcvsVotes, gDcvsFailed;   // S6f(b), gpuDcvs below
 void metalHeartbeat(void *, wait_result_t) {
     char row[64];
     hwWrite(nullptr, 0x8d0, 1);   // a8xx hw_init: CP_PERFCTR_CP_SEL(0) = 1 counts every cycle
@@ -1314,21 +1333,20 @@ void metalHeartbeat(void *, wait_result_t) {
             at += size_t(snprintf(tail + at, sizeof tail - at, " %x", d.marks[(total - shown + i) & 15]));
         snprintf(row, sizeof row, "K%u%s", total, tail);
         setRow(6, row);
-        // Row 7: F<RBBM MHz>/<CP MHz> measured over the last redraw, the S3 vote (status/firmware error, perf/bandwidth index) and the
-        // BO pool taken (MiB, its status).
+        // Row 7: F<RBBM MHz>/<CP MHz> measured over the last redraw, the current perf/bandwidth vote index,
         const uint64_t ticks = mach_absolute_time(), rbbm = perfCounter(0x1cc), cp = perfCounter(0x1b0);
         const uint64_t span = ticks - lastTicks ? ticks - lastTicks : 1;
         const unsigned rbbmMhz = unsigned((rbbm - lastRbbm) * 192 / span / 10), cpMhz = unsigned((cp - lastCp) * 192 / span / 10);
         lastTicks = ticks; lastRbbm = rbbm; lastCp = cp;
-        // and the coherence probe: C<stage><pass> d<dirty lines> r<GPU read new> w<CPU sees GPU write>/<in DRAM>.
+        // the DCVS state (b<busy % of the last sample> v<votes>/<failed>) and the coherence probe: C<stage><pass>.
         const uint32_t *k = gCoherence;
         // A8XX CP_RB_RPTR 0x806, CP_RB_WPTR 0x807, RBBM_STATUS 0x12 (prepare-erhai-gpu.py's ERHAI_GPU_* values, dwords): G r<RPTR>/<WPTR>.
         uint32_t rptr = 0, wptr = 0, status = 0;
         hwRead(nullptr, 0x806, &rptr);
         hwRead(nullptr, 0x807, &wptr);
         hwRead(nullptr, 0x012, &status);
-        snprintf(row, sizeof row, "F%u/%u P%u/%u C%u%u d%u r%u w%u/%u G%x/%x", rbbmMhz, cpMhz, gPerf, gBw, k[0], k[7], k[1], k[2], k[4], k[5],
-                 rptr, wptr);
+        snprintf(row, sizeof row, "F%u/%u P%u/%u b%u v%u/%u C%u%u G%x/%x", rbbmMhz, cpMhz, gPerf, gBw, gDcvsBusy, gDcvsVotes,
+                 gDcvsFailed, k[0], k[7], rptr, wptr);
         setRow(7, row);
         if (d.report2[0] == 'S' && d.report2[1] == 'T' && d.report2[2] >= '0' && d.report2[2] <= '6' && d.report2[3] == ' ')
             strlcpy(gStatus[d.report2[2] - '0'], d.report2 + 4, sizeof gStatus[0]);
@@ -1341,6 +1359,54 @@ void metalHeartbeat(void *, wait_result_t) {
         snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.111s", joined + 111);
         if (gStatus[4][0]) {snprintf(row, sizeof row, "%.47s", joined + 222); setRow(6, row);}
         IOSleep(2000);
+    }
+}
+// S6f(b): GPU DCVS between the enabled OPPs of this speed bin (160 to 900 MHz; the vendor DT starts at 222 MHz, its
+// initial-pwrlevel). Every 50 ms the GMU's GPU-busy counter (A8XX GMU_CX_GMU_POWER_COUNTER_XOCLK_0 0x1fca0/0x1fca1, 19.2 MHz,
+// countable BIT(5) selected by hw init, as a8xx_gpu_busy reads it) gives the busy share of the sample; the target clock is the
+// current one scaled to 70 % busy. Up goes straight to the lowest level that reaches the target, down one level per sample, so a
+// burst never waits for the clock. Each change is the S3 HFI GX_BW_PERF_VOTE with that OPP's bandwidth level. An explicit
+// `erhai-gpu-perf` pins the clock and no thread runs.
+uint64_t gmuBusy() {
+    uint32_t a = gmuRead(0, kGmuReg(0x1fca1)), b = gmuRead(0, kGmuReg(0x1fca0)), c = gmuRead(0, kGmuReg(0x1fca1));
+    if (c != a) b = gmuRead(0, kGmuReg(0x1fca0));
+    return uint64_t(c) << 32 | b;
+}
+int perfVote(unsigned perf) {
+    unsigned bw = 0;
+    perf = ShengGmuPerfVote(perf, &bw);
+    const uint32_t vote[3] = {1, perf, bw};
+    uint32_t out[16], error = 0;
+    size_t count = 0;
+    const int status = AdrenoHfiExchange(&gColdDevice.hfi, 30, vote, 3, 1000, hfiWait, out, 16, &count, &error);
+    if (status || error) {gDcvsFailed = gDcvsFailed + 1; return 1;}
+    gPerf = perf; gBw = bw; gDcvsVotes = gDcvsVotes + 1;
+    return 0;
+}
+void gpuDcvs(void *, wait_result_t) {
+    const AdrenoHfiStartupConfig &c = gStartup;
+    const unsigned top = c.gpu_count - 1;
+    unsigned level = 1;
+    while (level < top && c.gpu[level].hz < 222000000) ++level;
+    perfVote(level);
+    uint64_t lastTicks = mach_absolute_time(), lastBusy = gmuBusy();
+    for (;;) {
+        IOSleep(50);
+        const uint64_t ticks = mach_absolute_time(), busy = gmuBusy();
+        const uint64_t span = ticks - lastTicks ? ticks - lastTicks : 1;
+        uint64_t percent = (busy - lastBusy) * 100 / span;
+        if (percent > 100) percent = 100;
+        lastTicks = ticks; lastBusy = busy;
+        gDcvsBusy = uint32_t(percent);
+        const uint64_t target = c.gpu[gPerf].hz * percent / 70;
+        unsigned next = gPerf;
+        if (target > c.gpu[gPerf].hz) {
+            next = gPerf;
+            while (next < top && c.gpu[next].hz < target) ++next;
+        } else if (gPerf > 1 && target < c.gpu[gPerf - 1].hz) {
+            next = gPerf - 1;
+        }
+        if (next != gPerf) perfVote(next);
     }
 }
 void gmuPrerequisites(const egb_result &r) {
@@ -1443,6 +1509,11 @@ void gmuPrerequisites(const egb_result &r) {
     if (erhai_gpu_power_stage == 0xba && gS6[11] == 5 && &native_adreno_metal_diag &&
         kernel_thread_start(metalHeartbeat, nullptr, &heartbeat) == KERN_SUCCESS)
         thread_deallocate(heartbeat);
+    unsigned pinned = 0;
+    thread_t dcvs = nullptr;
+    if (erhai_gpu_power_stage == 0xba && gStartup.gpu_count > 2 && !PE_parse_boot_argn("erhai-gpu-perf", &pinned, sizeof pinned) &&
+        kernel_thread_start(gpuDcvs, nullptr, &dcvs) == KERN_SUCCESS)
+        thread_deallocate(dcvs);
 }
 // The whole report for the panic screen: every shown SMR, and each DT stream's bank registers.
 void dump(const egb_result &r) {

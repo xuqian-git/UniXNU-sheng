@@ -155,7 +155,7 @@ trust_cache_sha256 = [
 #                       right after the boot core (cpu1, cpu2), and sheng's boot-core park keeps cpu0 for last: prime,
 #                       then the other medium cores, then cpu0, which still runs work when every other core is busy
 #   native-ufs-smmu=2   the UFS stream is behind the hypervisor: an identity stage-1 context, not a bypass bank
-#   sheng-vsync=60      the software vsync of NativeLegacyDisplay; 60 rather than the panel's 144 while frames are CPU copies
+#   sheng-vsync=60      the software vsync of NativeLegacyDisplay; 60 while frames are CPU copies (the boot firmware leaves the panel at 120 Hz)
 # sheng's software-only switches are kept: the owned AppleKeyStore (sheng-aks), key events, HID input and Home.
 #   sheng-data-persist=2  Data writes go through to a store window at the end of userdata (below the 1024 MiB log reserve);
 #                       the seed is grown to fill it: seed-data-grow.py --auto --userdata-bytes 237866397696 (210 GiB)
@@ -220,8 +220,9 @@ text_fixups = [
 [payload.adt]
 tool = "scripts/make-erhai-adt.py"
 chip_id = "207"
-# 4 GiB in the high DRAM bank that erhaiPkg gives UEFI (0x8C0000000 + 5 GiB): nothing below 4 GiB is big enough.
-owned_memory_size = "0x100000000"
+# 7 GiB in the high DRAM bank that erhaiPkg gives UEFI (0x8C0000000 + 8.5 GiB): nothing below 4 GiB is big enough. More than 6 GiB
+# needs the 24-page bootstrap table pool of UniXNU's native-4k-bootstrap-capacity.patch.
+owned_memory_size = "0x1C0000000"
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 # All eight Oryon cores: six medium cores in cluster 0 (MPIDR Aff1 0..5) and the two prime cores at 0x10000/0x10100
 # (Aff2=1; XNU's CPU phys id must keep Aff2: UniXNU patches/xnu/native-smp-wide-affinity.patch). The prime cores come
