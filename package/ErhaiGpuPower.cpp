@@ -1142,6 +1142,85 @@ void s6Row() {
              static_cast<unsigned long long>(gDeviceInfo.va_start), static_cast<unsigned long long>(gDeviceInfo.va_size),
              f.highest_bank_bit, f.ubwc_swizzle, f.macrotile_mode, f.ubwc_version, gDeviceInfo.flags, p[13], gpuFsr(0x58));
 }
+// S6e: whether the A830 reads and writes through the CPU caches (Linux ADRENO_QUIRK_HAS_CACHED_COHERENT for a8xx_gen1; sheng's
+// GpuPowerProbe coherenceProbe, ported). Until it passes, NativeAdrenoVm cleans and invalidates every imported surface at every
+// submission: on erhai about 300 MB and 20 ms per submission (GPUC). Read direction: S's new words left dirty in a CPU cache (DRAM still
+// holds the old ones, at least 48 of its 64 sampled lines) must reach D through a GPU CP_MEMCPY. Write direction: the GPU's copy of R
+// into T must replace T's clean resident lines. Pass sets native_adreno_io_coherent; any failure leaves maintenance on.
+extern "C" volatile uint32_t native_adreno_io_coherent;
+uint32_t gCoherence[8];   // stage, dirty lines, read new/old, write seen by CPU / in DRAM, status, pass
+bool dramPage(uint64_t pa, uint32_t *out) {
+    const vm_offset_t page = ml_io_map_unmappable(vm_offset_t(pa), 0x1000, 0x7 /* VM_WIMG_IO */);
+    if (!page) return false;
+    for (unsigned i = 0; i < 1024; ++i) out[i] = reinterpret_cast<const volatile uint32_t *>(page)[i];
+    ml_io_unmap(page, 0x1000);
+    return true;
+}
+bool gpuCopyPage(uint64_t src, uint64_t dst) {
+    // CP_MEMCPY (0x75: dwords, source, destination) then CP_WAIT_MEM_WRITES (0x12), and the fence.
+    uint32_t words[8] = {}, result = 0;
+    if (AdrenoPM4Type7(0x75, 5, &words[0]) != AdrenoPM4Success || AdrenoPM4Type7(0x12, 0, &words[6]) != AdrenoPM4Success) return false;
+    words[1] = 1024; words[2] = uint32_t(src); words[3] = uint32_t(src >> 32); words[4] = uint32_t(dst); words[5] = uint32_t(dst >> 32);
+    return cpSubmit(words, 7, &result);
+}
+void coherenceProbe(NativeAdrenoVm *vm) {
+    uint32_t *k = gCoherence;
+    unsigned wanted = 2;   // 1 = sheng's strict form (needs the dirty precondition), 2 = without it (below), 0 = off
+    PE_parse_boot_argn("erhai-gpu-coherent", &wanted, sizeof wanted);
+    if (!wanted || !vm) return;
+    constexpr uint64_t kIova = 0x18000000;
+    constexpr size_t kBytes = 4 * 4096;
+    uint8_t *buf = static_cast<uint8_t *>(IOMallocAligned(kBytes, 4096));
+    NativeAdrenoMemory mem;
+    uint64_t handle = 0;
+    IOReturn st = buf ? mem.importTask(kernel_task, uint64_t(uintptr_t(buf)), kBytes, gGpuContext.output_bits, kBytes) : kIOReturnNoMemory;
+    k[0] = 1;
+    if (!st) {k[0] = 2; st = vm->map(&mem, 0, kIova, 3, 1, 3, &handle);}
+    uint64_t phys[4] = {};
+    for (size_t j = 0; !st && j < mem.spanCount(); ++j)
+        for (size_t at = 0; at < mem.spans()[j].bytes; at += 4096) phys[(mem.spans()[j].offset + at) / 4096] = mem.spans()[j].physical + at;
+    static uint32_t words[1024];
+    if (!st && phys[0] && phys[1] && phys[2] && phys[3]) {
+        k[0] = 3;
+        volatile uint32_t *S = reinterpret_cast<volatile uint32_t *>(buf), *D = S + 1024, *R = S + 2048, *T = S + 3072;
+        bool dirty = false;
+        for (unsigned attempt = 0; attempt < 8 && !st && !dirty; ++attempt) {
+            for (unsigned i = 0; i < 1024; ++i) {S[i] = 0x11110000u | i; D[i] = 0; R[i] = 0x33330000u | i; T[i] = 0x44440000u | i;}
+            st = NativeAdrenoMaintainOwnedPages(buf, kBytes, NativeAdrenoCleanInvalidate);
+            for (unsigned i = 0; i < 1024; ++i) S[i] = 0x22220000u | i;
+            __asm__ volatile("dsb sy" ::: "memory");
+            k[1] = 0;
+            if (!st && dramPage(phys[0], words)) for (unsigned i = 0; i < 1024; i += 16) k[1] += words[i] == (0x11110000u | i);
+            dirty = k[1] >= 48;
+        }
+        // erhai-gpu-coherent=2: Oryon's uncached reads of a line its own cache holds dirty return the cached data (d0 every attempt,
+        // as sheng's int-150 found), so the precondition can never be shown; the copy then runs on the freshly written lines anyway.
+        if (!st && (dirty || wanted == 2)) {
+            k[0] = 4;
+            if (gpuCopyPage(kIova, kIova + 4096) && dramPage(phys[1], words)) {
+                k[0] = 5;
+                for (unsigned i = 0; i < 1024; ++i) {k[2] += words[i] == (0x22220000u | i); k[3] += words[i] == (0x11110000u | i);}
+            }
+        }
+        if (!st && k[0] == 5) st = NativeAdrenoMaintainOwnedPages(const_cast<uint32_t *>(T), 4096, NativeAdrenoClean);
+        uint32_t touch = 0;
+        for (unsigned i = 0; i < 1024; ++i) touch += T[i];
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (!st && k[0] == 5 && gpuCopyPage(kIova + 8192, kIova + 12288)) {
+            k[0] = 6;
+            for (unsigned i = 0; i < 1024; ++i) k[4] += T[i] == (0x33330000u | i);
+            if (dramPage(phys[3], words)) for (unsigned i = 0; i < 1024; ++i) k[5] += words[i] == (0x33330000u | i);
+        }
+        (void)touch;
+    }
+    k[6] = uint32_t(st);
+    if (handle) (void)vm->unmap(handle);
+    if (buf) (void)NativeAdrenoMaintainOwnedPages(buf, kBytes, NativeAdrenoCleanInvalidate);
+    (void)mem.release();
+    if (buf) IOFreeAligned(buf, kBytes);
+    k[7] = k[0] == 6 && (k[1] >= 48 || wanted == 2) && k[2] == 1024 && k[4] == 1024 && k[5] == 1024;
+    native_adreno_io_coherent = k[7] ? 1 : 0;
+}
 void gpuPublishTest() {
     int32_t *p = gS6;
     p[4] = p[5] = p[6] = -1;
@@ -1154,6 +1233,7 @@ void gpuPublishTest() {
     gDeviceInfo = {gFacts.chip_id, gFacts.gmem_bytes, gFacts.gmem_base, gFacts.uche_trap_base, 0x20000000ull, 0x60000000ull,
                    gFacts.highest_bank_bit, gFacts.ubwc_swizzle, gFacts.macrotile_mode, gFacts.ubwc_version,
                    NativeAdrenoDeviceClientIova, 0};
+    coherenceProbe(NativeAdrenoGpuContextVm());
     const NativeAdrenoTimeIo timerIo{nullptr, timerCpRead};
     const IOReturn timer = gTimer.attach(&timerIo, NativeAdrenoTimeCp);
     p[13] = timer;
@@ -1198,8 +1278,26 @@ extern "C" volatile int native_gpu_addon_stage __attribute__((weak)), native_gpu
 extern "C" volatile uint32_t native_legacy_swap_rejected_count __attribute__((weak)), native_legacy_rej_reason __attribute__((weak)),
     native_legacy_rej_state[3] __attribute__((weak)), native_legacy_rej_size[2] __attribute__((weak));
 extern "C" volatile uint64_t native_legacy_rej_surface[7] __attribute__((weak));
+// S6e: the GPU core clock, measured. RBBM and CP perf counter 0 count their ALWAYS_COUNT countable (every core-clock cycle): A8XX
+// RBBM_PERFCTR_RBBM_SEL_0 0x441, CP_PERFCTR_CP_SEL_0 0x8d0, RBBM_PERFCTR_CNTL 0x460 (1 = enabled), RBBM_PERFCTR_RBBM_0 0x1cc/0x1cd,
+// RBBM_PERFCTR_CP_0 0x1b0/0x1b1 (mesa a6xx.xml A8XX variants); against CNTVCT (19.2 MHz) between two redraws.
+uint64_t perfCounter(uint32_t lo) {
+    uint32_t a = 0, b = 0, c = 0;
+    hwRead(nullptr, lo + 1, &a);
+    hwRead(nullptr, lo, &b);
+    hwRead(nullptr, lo + 1, &c);
+    if (c != a) hwRead(nullptr, lo, &b);
+    return uint64_t(c) << 32 | b;
+}
+// The plugin's status line (native_bridge_metal_status: counters, then the last two refusals' texts) arrives as 57-character pieces
+// "ST<n> ..." on report2, one every ten seconds; the heartbeat keeps each piece and shows them joined over the wide rows.
+char gStatus[8][58];
 void metalHeartbeat(void *, wait_result_t) {
     char row[64];
+    hwWrite(nullptr, 0x8d0, 1);   // a8xx hw_init: CP_PERFCTR_CP_SEL(0) = 1 counts every cycle
+    hwWrite(nullptr, 0x460, 1);
+    __asm__ volatile("dsb sy" ::: "memory");
+    uint64_t lastTicks = mach_absolute_time(), lastRbbm = perfCounter(0x1cc), lastCp = perfCounter(0x1b0);
     for (unsigned t = 0;; ++t) {
         const MetalDiagView &d = native_adreno_metal_diag;
         // Row 5: H<beat> a<addon mount stage>.<status> o<opens>/<refused>/<closed> n<MetalPluginName reads> r<reports> c<calls>
@@ -1216,29 +1314,32 @@ void metalHeartbeat(void *, wait_result_t) {
             at += size_t(snprintf(tail + at, sizeof tail - at, " %x", d.marks[(total - shown + i) & 15]));
         snprintf(row, sizeof row, "K%u%s", total, tail);
         setRow(6, row);
-        // Row 7: the BO pool taken (MiB, its status), the newest opener and starter processes.
-        snprintf(row, sizeof row, "B%u.%x O %.14s S %.14s", native_adreno_pool_stats[0], native_adreno_pool_status, d.opener[0],
-                 d.starter[0]);
-        setRow(7, row);
-        // Wide row 1: the Turnip phase's line (T s<stage> r<VkResult> v<fill> c<compute> g<triangle>/<stray>), the raw test's line, and
-        // the ring now (G r<RPTR>/<WPTR> s<RBBM_STATUS>): a GPU that stops shows RPTR behind WPTR on every redraw.
-        // Wide row 0 (the S6 facts are on the first photo of each boot): once the display rejects a swap, what it rejected.
-        if (&native_legacy_swap_rejected_count && native_legacy_swap_rejected_count && t >= 3) {
-            const volatile uint64_t *f = native_legacy_rej_surface;
-            snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0],
-                     "REJ n%u r%u st%x/%x/%x wh%ux%u S%llux%llu f%llx pl%llu st%llu al%llu ml%llu", native_legacy_swap_rejected_count,
-                     native_legacy_rej_reason, native_legacy_rej_state[0], native_legacy_rej_state[1], native_legacy_rej_state[2],
-                     native_legacy_rej_size[0], native_legacy_rej_size[1], (unsigned long long)f[0], (unsigned long long)f[1],
-                     (unsigned long long)f[2], (unsigned long long)f[3], (unsigned long long)f[4], (unsigned long long)f[5],
-                     (unsigned long long)f[6]);
-        }
-        // A8XX CP_RB_RPTR 0x806, CP_RB_WPTR 0x807, RBBM_STATUS 0x12 (prepare-erhai-gpu.py's ERHAI_GPU_* values, dwords).
+        // Row 7: F<RBBM MHz>/<CP MHz> measured over the last redraw, the S3 vote (status/firmware error, perf/bandwidth index) and the
+        // BO pool taken (MiB, its status).
+        const uint64_t ticks = mach_absolute_time(), rbbm = perfCounter(0x1cc), cp = perfCounter(0x1b0);
+        const uint64_t span = ticks - lastTicks ? ticks - lastTicks : 1;
+        const unsigned rbbmMhz = unsigned((rbbm - lastRbbm) * 192 / span / 10), cpMhz = unsigned((cp - lastCp) * 192 / span / 10);
+        lastTicks = ticks; lastRbbm = rbbm; lastCp = cp;
+        // and the coherence probe: C<stage><pass> d<dirty lines> r<GPU read new> w<CPU sees GPU write>/<in DRAM>.
+        const uint32_t *k = gCoherence;
+        // A8XX CP_RB_RPTR 0x806, CP_RB_WPTR 0x807, RBBM_STATUS 0x12 (prepare-erhai-gpu.py's ERHAI_GPU_* values, dwords): G r<RPTR>/<WPTR>.
         uint32_t rptr = 0, wptr = 0, status = 0;
         hwRead(nullptr, 0x806, &rptr);
         hwRead(nullptr, 0x807, &wptr);
         hwRead(nullptr, 0x012, &status);
-        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.44s | %.38s | G r%x/%x s%x", d.report2[0] ? d.report2 : "T -",
-                 d.report[0] ? d.report : "-", rptr, wptr, status);
+        snprintf(row, sizeof row, "F%u/%u P%u/%u C%u%u d%u r%u w%u/%u G%x/%x", rbbmMhz, cpMhz, gPerf, gBw, k[0], k[7], k[1], k[2], k[4], k[5],
+                 rptr, wptr);
+        setRow(7, row);
+        if (d.report2[0] == 'S' && d.report2[1] == 'T' && d.report2[2] >= '0' && d.report2[2] <= '6' && d.report2[3] == ' ')
+            strlcpy(gStatus[d.report2[2] - '0'], d.report2 + 4, sizeof gStatus[0]);
+        char joined[8 * 57 + 1] = {};
+        size_t used = 0;
+        for (unsigned i = 0; i < 7; ++i)
+            for (unsigned j = 0; j < 57 && used < sizeof joined - 1; ++j) joined[used++] = gStatus[i][j] ? gStatus[i][j] : ' ';
+        // Wide rows: status pieces 0-3 (111 characters each); row 6: piece 4 onward once it has arrived.
+        snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "%.111s", joined);
+        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.111s", joined + 111);
+        if (gStatus[4][0]) {snprintf(row, sizeof row, "%.47s", joined + 222); setRow(6, row);}
         IOSleep(2000);
     }
 }
