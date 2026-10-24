@@ -34,12 +34,12 @@ package is shared unchanged and the branch only adds the board. It tracks `UniXN
 | UFS root (verified OS + SystemOS windows on userdata) | ✅ | |
 | launchd and userspace | ✅ | Needed native PAN (Oryon implements PAN) |
 | Data volume | ✅ | Persistent: the store window at the end of userdata (`sheng-data-persist=2`), seed grown to 210 GiB with `seed-data-grow.py --auto`; resumes across boots with no I/O errors |
-| Display | ⚠️ | CPU-rendered (QuartzCore's CPU renderer, no GPU) into NativeLegacyDisplay on the GOP framebuffer (3392x2400); cached source reads cut the per-frame copy from ~170 ms to ~16 ms (`patches/NativeMobileDisplay-fast-copy.patch`). Settings stays white (CPU renderer, as on UniXNU's QEMU without Metal) |
+| Display | ⚠️ | The render server composites through the Adreno 830 (S6d) into NativeLegacyDisplay on the GOP framebuffer (3392x2400), at 120 Hz (S6g), held at 8 bits per channel. Short stalls remain; iconservicesagent crashes |
 | SpringBoard / lock screen | ✅ | backboardd and SpringBoard stay up; the lock screen is shown (2026-10-23) |
 | Home screen | ✅ | reachable by swiping up; apps launch (2026-10-23) |
 | Touch (Novatek NT36536) | ✅ | `ErhaiTouchProbe`: QUP1 SE4 SPI with SE DMA, firmware download each boot, HID multitouch; taps and swipes verified (`erhai-touch-orient=6`) |
 | CPU DVFS and thermal | ✅ | `ErhaiCpuFreq`: SCMI performance protocol through the CPUCP mailbox; load governor and TSENS limit with stock ColorOS targets (80% load, hispeed, floors, 2918/3072 MHz sustained cap, 75 C) |
-| GPU (Adreno 830) | ❌ | |
+| GPU (Adreno 830) | ⚠️ | Native bring-up: GMU, GX power, zap shader, CP, IRQ fence wait, DCVS 160-900 MHz, 4 GiB GPU VA (S1-S6f). Metal through an owner plugin running Mesa 26.1 Turnip; fill, compute and triangle pass (S6c) |
 | Wi-Fi, Bluetooth, audio, camera, USB, battery, suspend | ❌ | |
 | Unattended test runs | ✅ | XNU restarts into fastboot by itself (`sheng-autoreset`, PMIC reboot-reason cell); a Linux log reader on init_boot_b hands the UFS log window, the diagnostic export and a screenshot to the host as a USB volume (2026-10-24) |
 
