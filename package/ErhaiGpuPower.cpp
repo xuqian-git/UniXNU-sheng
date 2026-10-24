@@ -821,6 +821,28 @@ volatile uint32_t gIrqCount, gIrqSeen, gIrqLast, gIrqEmpty, gIrqFatal;
 // attach status, GICD readback, INT_0_MASK, irqs after attach / after one more fence, fence ok, CP and GMU counter kHz,
 // user-client steps ok / total, first error / at, round 1 / 2 dwords, irqs during the rounds, close, CB0 FSR, GFSR
 uint32_t gS5[20];
+// S6h: GPU execution time per submission. At each fence interrupt, every fence the CP has written since the last one is timed from
+// when it was handed to the CP (NativeAdrenoSubmit's native_adreno_submit_times) or, if the GPU was still busy with the one before,
+// from that one's completion: queueing behind earlier work is not counted. Fences that land together share one interrupt, so the
+// first takes the time. The heartbeat shows the window (count, sum, slowest with its IB bytes and queue) and resets it.
+uint32_t gTimedFence;
+uint64_t gTimedAt;
+volatile uint32_t gGpuJobs, gGpuJobMaxUs, gGpuJobMaxBytes, gGpuJobMaxQueue;
+volatile uint64_t gGpuJobSumUs;
+void timeCompletions() {
+    const uint32_t done = gRing.cpFence();
+    const uint64_t now = mach_absolute_time();
+    for (uint32_t f = gTimedFence + 1; gTimedFence && int32_t(done - f) >= 0 && int32_t(done - gTimedFence) <= 64; ++f) {
+        const NativeAdrenoSubmitTime &t = native_adreno_submit_times[f & 63];
+        if (t.fence != f) continue;
+        const uint64_t began = t.at > gTimedAt ? t.at : gTimedAt;
+        const uint32_t us = now > began ? uint32_t((now - began) * 10 / 192) : 0;
+        gGpuJobs = gGpuJobs + 1; gGpuJobSumUs = gGpuJobSumUs + us;
+        if (us > gGpuJobMaxUs) {gGpuJobMaxUs = us; gGpuJobMaxBytes = t.bytes; gGpuJobMaxQueue = t.queue;}
+        gTimedAt = now;
+    }
+    if (int32_t(done - gTimedFence) > 0) {gTimedFence = done; gTimedAt = now;}
+}
 void gpuIrq(void *) {
     // a8xx_irq: RBBM_INT_0_STATUS read and cleared through RBBM_INT_CLEAR_CMD first, so the level line drops before the EOI.
     // A line with nothing to clear (a storm) masks the GPU interrupts instead of hanging the CPU it is routed to.
@@ -830,6 +852,7 @@ void gpuIrq(void *) {
     gIrqSeen = gIrqSeen | r.status;
     gIrqCount = gIrqCount + 1;
     if (r.flags & NativeAdrenoIrqFatal) gIrqFatal = gIrqFatal + 1;
+    if (r.flags & NativeAdrenoIrqFence) timeCompletions();
     if (r.flags & NativeAdrenoIrqFence) thread_wakeup_prim(reinterpret_cast<event_t>(&gFenceEvent), false, THREAD_AWAKENED);
     gIrqEmpty = r.status ? 0 : gIrqEmpty + 1;
     if (gIrqEmpty > 100000) hwWrite(nullptr, kIntMask, 0);
@@ -1364,7 +1387,11 @@ void metalHeartbeat(void *, wait_result_t) {
         // Wide row 0: status pieces 0-1 (111 characters); wide row 1: the other Metal processes' own lines (device failures, the bridge's
         // refusals), name: text, as many as fit.
         snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "%.111s", joined);
-        char clients[112] = "C";
+        // G n<GPU jobs> u<GPU busy % of the 2 s> a<mean us> x<slowest us> i<its IB bytes> q<its queue>, then the client lines.
+        char clients[112];
+        snprintf(clients, sizeof clients, "G n%u u%llu a%llu x%u i%u q%u C", gGpuJobs, static_cast<unsigned long long>(gGpuJobSumUs / 20000),
+                 static_cast<unsigned long long>(gGpuJobs ? gGpuJobSumUs / gGpuJobs : 0), gGpuJobMaxUs, gGpuJobMaxBytes, gGpuJobMaxQueue);
+        gGpuJobs = 0; gGpuJobSumUs = 0; gGpuJobMaxUs = 0;
         if (&native_adreno_client_text)
             for (unsigned i = 0; i < 4 && native_adreno_client_text[i].name[0]; ++i) {
                 const size_t used = strlen(clients);
