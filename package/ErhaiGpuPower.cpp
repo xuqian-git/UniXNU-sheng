@@ -1311,6 +1311,12 @@ uint64_t perfCounter(uint32_t lo) {
 // "ST<n> ..." on report2, one every ten seconds; the heartbeat keeps each piece and shows them joined over the wide rows.
 char gStatus[8][58];
 volatile uint32_t gDcvsBusy, gDcvsVotes, gDcvsFailed;   // S6f(b), gpuDcvs below
+// S6g: frame pacing, sampled by gpuDcvs every 4 ms from the display's GPU completions (frames on the panel). Gaps under one second are
+// frames of one burst of animation; the window (reset by each heartbeat) counts them, the late ones (over 25 ms, a missed 60 Hz frame;
+// over 100 ms, a visible stall), the longest gap and the perf level and GPU busy share when it ended; totals since boot alongside.
+volatile uint32_t gPaceFrames, gPaceLate, gPaceStall, gPaceMaxMs, gPaceMaxPerf, gPaceMaxBusy, gPaceLateAll, gPaceStallAll;
+extern "C" volatile uint64_t native_gop_gpu_completions __attribute__((weak_import));
+extern "C" volatile uint64_t native_adreno_wait_outer[4] __attribute__((weak_import));
 void metalHeartbeat(void *, wait_result_t) {
     char row[64];
     hwWrite(nullptr, 0x8d0, 1);   // a8xx hw_init: CP_PERFCTR_CP_SEL(0) = 1 counts every cycle
@@ -1325,14 +1331,6 @@ void metalHeartbeat(void *, wait_result_t) {
                  &native_gpu_addon_status ? unsigned(native_gpu_addon_status) : 0u, d.opens, d.busy, d.closes, d.name_reads, d.reports,
                  d.calls, d.last_selector, d.last_status, d.inflight, gIrqCount, gpuFsr(0x58));
         setRow(5, row);
-        // Row 6: the plugin's newest markers (0x4147xxxx open types: 1 started, 3 opened, 3xxx step done, 4xxx step failed, 5xxx reported).
-        char tail[48] = {};
-        const unsigned total = d.marks_total, shown = total < 6 ? total : 6;
-        size_t at = 0;
-        for (unsigned i = 0; i < shown && at < sizeof tail - 6; ++i)
-            at += size_t(snprintf(tail + at, sizeof tail - at, " %x", d.marks[(total - shown + i) & 15]));
-        snprintf(row, sizeof row, "K%u%s", total, tail);
-        setRow(6, row);
         // Row 7: F<RBBM MHz>/<CP MHz> measured over the last redraw, the current perf/bandwidth vote index,
         const uint64_t ticks = mach_absolute_time(), rbbm = perfCounter(0x1cc), cp = perfCounter(0x1b0);
         const uint64_t span = ticks - lastTicks ? ticks - lastTicks : 1;
@@ -1348,21 +1346,28 @@ void metalHeartbeat(void *, wait_result_t) {
         snprintf(row, sizeof row, "F%u/%u P%u/%u b%u v%u/%u C%u%u G%x/%x", rbbmMhz, cpMhz, gPerf, gBw, gDcvsBusy, gDcvsVotes,
                  gDcvsFailed, k[0], k[7], rptr, wptr);
         setRow(7, row);
+        // Row 6 (row 4 is overwritten by every traced register access): J f<frames> l<late>/<all late> s<stalls>/<all stalls>
+        // m<longest gap ms> at P<perf> b<busy %>, w<longest fence wait ms>. It replaces the markers and status piece 4 there.
+        snprintf(row, sizeof row, "J f%u l%u/%u s%u/%u m%u P%u b%u w%llu", gPaceFrames, gPaceLate, gPaceLateAll, gPaceStall, gPaceStallAll,
+                 gPaceMaxMs, gPaceMaxPerf, gPaceMaxBusy,
+                 &native_adreno_wait_outer ? static_cast<unsigned long long>(native_adreno_wait_outer[3] / 1000) : 0ull);
+        setRow(6, row);
+        gPaceFrames = 0; gPaceLate = 0; gPaceStall = 0; gPaceMaxMs = 0;
         if (d.report2[0] == 'S' && d.report2[1] == 'T' && d.report2[2] >= '0' && d.report2[2] <= '6' && d.report2[3] == ' ')
             strlcpy(gStatus[d.report2[2] - '0'], d.report2 + 4, sizeof gStatus[0]);
         char joined[8 * 57 + 1] = {};
         size_t used = 0;
         for (unsigned i = 0; i < 7; ++i)
             for (unsigned j = 0; j < 57 && used < sizeof joined - 1; ++j) joined[used++] = gStatus[i][j] ? gStatus[i][j] : ' ';
-        // Wide rows: status pieces 0-3 (111 characters each); row 6: piece 4 onward once it has arrived.
+        // Wide rows: status pieces 0-3 (111 characters each).
         snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "%.111s", joined);
         snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.111s", joined + 111);
-        if (gStatus[4][0]) {snprintf(row, sizeof row, "%.47s", joined + 222); setRow(6, row);}
+
         IOSleep(2000);
     }
 }
 // S6f(b): GPU DCVS between the enabled OPPs of this speed bin (160 to 900 MHz; the vendor DT starts at 222 MHz, its
-// initial-pwrlevel). Every 50 ms the GMU's GPU-busy counter (A8XX GMU_CX_GMU_POWER_COUNTER_XOCLK_0 0x1fca0/0x1fca1, 19.2 MHz,
+// initial-pwrlevel). Every 16 ms (S6g; 50 ms in S6f left the first frames of a burst at 160 MHz) the GMU's GPU-busy counter (A8XX GMU_CX_GMU_POWER_COUNTER_XOCLK_0 0x1fca0/0x1fca1, 19.2 MHz,
 // countable BIT(5) selected by hw init, as a8xx_gpu_busy reads it) gives the busy share of the sample; the target clock is the
 // current one scaled to 70 % busy. Up goes straight to the lowest level that reaches the target, down one level per sample, so a
 // burst never waits for the clock. Each change is the S3 HFI GX_BW_PERF_VOTE with that OPP's bandwidth level. An explicit
@@ -1390,8 +1395,20 @@ void gpuDcvs(void *, wait_result_t) {
     while (level < top && c.gpu[level].hz < 222000000) ++level;
     perfVote(level);
     uint64_t lastTicks = mach_absolute_time(), lastBusy = gmuBusy();
-    for (;;) {
-        IOSleep(50);
+    uint64_t frames = &native_gop_gpu_completions ? native_gop_gpu_completions : 0, frameAt = lastTicks;
+    for (unsigned tick = 1;; ++tick) {
+        IOSleep(4);
+        if (&native_gop_gpu_completions && native_gop_gpu_completions != frames) {
+            const uint64_t now = mach_absolute_time(), ms = (now - frameAt) / 19200;
+            frames = native_gop_gpu_completions; frameAt = now;
+            if (ms < 1000) {
+                gPaceFrames = gPaceFrames + 1;
+                if (ms > 25) {gPaceLate = gPaceLate + 1; gPaceLateAll = gPaceLateAll + 1;}
+                if (ms > 100) {gPaceStall = gPaceStall + 1; gPaceStallAll = gPaceStallAll + 1;}
+                if (ms > gPaceMaxMs) {gPaceMaxMs = uint32_t(ms); gPaceMaxPerf = gPerf; gPaceMaxBusy = gDcvsBusy;}
+            }
+        }
+        if (tick % 4) continue;
         const uint64_t ticks = mach_absolute_time(), busy = gmuBusy();
         const uint64_t span = ticks - lastTicks ? ticks - lastTicks : 1;
         uint64_t percent = (busy - lastBusy) * 100 / span;

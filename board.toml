@@ -155,7 +155,8 @@ trust_cache_sha256 = [
 #                       right after the boot core (cpu1, cpu2), and sheng's boot-core park keeps cpu0 for last: prime,
 #                       then the other medium cores, then cpu0, which still runs work when every other core is busy
 #   native-ufs-smmu=2   the UFS stream is behind the hypervisor: an identity stage-1 context, not a bypass bank
-#   sheng-vsync=60      the software vsync of NativeLegacyDisplay; 60 while frames are CPU copies (the boot firmware leaves the panel at 120 Hz)
+#   sheng-vsync=120     the software vsync of NativeLegacyDisplay, at the panel's 120 Hz (the boot firmware's mode); above 60 it also
+#                       publishes IOMFBDisplayRefresh with a 1/120 s minimum interval, so the render server paces for ProMotion
 # sheng's software-only switches are kept: the owned AppleKeyStore (sheng-aks), key events, HID input and Home.
 #   sheng-data-persist=2  Data writes go through to a store window at the end of userdata (below the 1024 MiB log reserve);
 #                       the seed is grown to fill it: seed-data-grow.py --auto --userdata-bytes 237866397696 (210 GiB)
@@ -197,7 +198,7 @@ kernel_args = [
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
   "sheng-fb-diff=1",
-  "sheng-vsync=60",
+  "sheng-vsync=120",
 ]
 
 # Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch). They are
