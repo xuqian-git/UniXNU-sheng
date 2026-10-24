@@ -1316,6 +1316,8 @@ volatile uint32_t gDcvsBusy, gDcvsVotes, gDcvsFailed;   // S6f(b), gpuDcvs below
 // over 100 ms, a visible stall), the longest gap and the perf level and GPU busy share when it ended; totals since boot alongside.
 volatile uint32_t gPaceFrames, gPaceLate, gPaceStall, gPaceMaxMs, gPaceMaxPerf, gPaceMaxBusy, gPaceLateAll, gPaceStallAll;
 extern "C" volatile uint64_t native_gop_gpu_completions __attribute__((weak_import));
+struct NativeAdrenoClientText {char name[20]; char text[64];};
+extern "C" struct NativeAdrenoClientText native_adreno_client_text[4] __attribute__((weak_import));
 extern "C" volatile uint64_t native_adreno_wait_outer[4] __attribute__((weak_import));
 void metalHeartbeat(void *, wait_result_t) {
     char row[64];
@@ -1359,9 +1361,16 @@ void metalHeartbeat(void *, wait_result_t) {
         size_t used = 0;
         for (unsigned i = 0; i < 7; ++i)
             for (unsigned j = 0; j < 57 && used < sizeof joined - 1; ++j) joined[used++] = gStatus[i][j] ? gStatus[i][j] : ' ';
-        // Wide rows: status pieces 0-3 (111 characters each).
+        // Wide row 0: status pieces 0-1 (111 characters); wide row 1: the other Metal processes' own lines (device failures, the bridge's
+        // refusals), name: text, as many as fit.
         snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "%.111s", joined);
-        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.111s", joined + 111);
+        char clients[112] = "C";
+        if (&native_adreno_client_text)
+            for (unsigned i = 0; i < 4 && native_adreno_client_text[i].name[0]; ++i) {
+                const size_t used = strlen(clients);
+                snprintf(clients + used, sizeof clients - used, " %.12s:%.60s;", native_adreno_client_text[i].name, native_adreno_client_text[i].text);
+            }
+        snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.111s", clients);
 
         IOSleep(2000);
     }

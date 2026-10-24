@@ -662,6 +662,8 @@ void boot_progress_exit(int pid,const char *name,int status,unsigned ns,uint64_t
   if(signal==6 && boot_progress_exit_reason) {
     if(&boot_progress_throw_text)boot_progress_throw_text[0]=0;
     boot_progress_exit_reason(pid,signal,exit_records.reason,sizeof(exit_records.reason));
+    snprintf(exit_records.reason_who,sizeof(exit_records.reason_who),"p%d %.20s",pid,name?name:"?");
+    exit_records.thrown[0]=0;
     if(&boot_progress_throw_text && boot_progress_throw_text[0])strlcpy(exit_records.thrown,boot_progress_throw_text,sizeof(exit_records.thrown));
   }
   if(!exit_watch_parsed){exit_watch_parsed=1;if(!PE_parse_boot_argn("boot-exit-watch",exit_watch_name,sizeof(exit_watch_name)))exit_watch_name[0]=0;}
@@ -979,8 +981,13 @@ static void crash_banner(unsigned now) {
     for(unsigned part=0;part<4 && text[part*108] && n<10;++part)
       snprintf(rows[n++],120,"%s%.108s",part?"      ":"CRASH ",text+part*108);
   }
-  for(unsigned part=0;part<3 && exit_records.reason[part*108] && n<12;++part)
-    snprintf(rows[n++],120,"%s%.108s",part?"       ":"REASON ",exit_records.reason+part*108);
+  // The abort's reason, under the process it belongs to (the newest sig6, which need not be one of the crash rows above), then the throw
+  // site ExceptionDiag recorded in that process (THROW: name | reason | return addresses, against the crash row's slide).
+  if(exit_records.reason[0] && n<12)snprintf(rows[n++],120,"REASON %.24s: %.84s",exit_records.reason_who,exit_records.reason);
+  for(unsigned part=0;part<2 && strlen(exit_records.reason)>84+part*108 && n<12;++part)
+    snprintf(rows[n++],120,"       %.108s",exit_records.reason+84+part*108);
+  for(unsigned part=0;part<3 && exit_records.thrown[part*108] && n<14;++part)
+    snprintf(rows[n++],120,"%s%.108s",part?"      ":"THROW ",exit_records.thrown+part*108);
   for(unsigned i=0;i<3 && i<failed;++i)snprintf(rows[n++],120,"EXIT  %.100s",exit_records.failures[(failed-1-i)%3]);
   __atomic_store_n(&exit_lock,0,__ATOMIC_RELEASE);
   // Presentation cost: swaps in the last second and the time of the pixel copy (last / mean / maximum, microseconds).
@@ -1126,7 +1133,7 @@ static void crash_banner(unsigned now) {
     if(__atomic_load_n(&display.yield_requested,__ATOMIC_ACQUIRE))return;
     const char *r=rows[i];
     // Colour by row kind: failures red, exit records yellow, GPU results cyan, timing and load rows grey.
-    uint32_t color=!strncmp(r,"CRASH",5)||!strncmp(r,"PANIC",5)?0xffff5a5a:!strncmp(r,"REASON",6)?0xffff9a70:
+    uint32_t color=!strncmp(r,"CRASH",5)||!strncmp(r,"PANIC",5)?0xffff5a5a:!strncmp(r,"REASON",6)?0xffff9a70:!strncmp(r,"THROW",5)?0xffff66ff:
       !strncmp(r,"EXIT",4)?0xffffe066:!strncmp(r,"GPU",3)?0xff66e0ff:r[0]==' '?0xffff8a8a:0xffb4bcc6;
     px_text(0,top+i*cell,r,cols,color,0xff0d1117);
   }

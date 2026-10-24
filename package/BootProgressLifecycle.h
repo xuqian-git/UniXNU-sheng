@@ -8,6 +8,7 @@ struct bp_exits {
  char recent[4][120],failures[3][120],crash[3][400];
  char reason[330];
  char thrown[330];
+ char reason_who[32];   // "p<pid> <name>" of the abort reason and thrown belong to
 };
 static void bp_exit_add(struct bp_exits *e,int pid,const char *name,int status,
                         unsigned ns,uint64_t code) {
